@@ -152,7 +152,7 @@
       "sign": null,
       "signDlls": false,
       "forceCodeSigning": false,
-      "blockMap": false  // 添加这一行
+      "blockMap": false
     },
     "mac": {
       "target": [
@@ -193,10 +193,10 @@
       "shortcutName": "GuaDa",
       "differentialPackage": true,
       "deleteAppDataOnUninstall": true,
-      "blockMap": false  // 添加这一行
+      "blockMap": false
     }
-    "publish": null,  // 添加这一行
-    "generateUpdatesFilesForAllChannels": false  // 添加这一行
+    "publish": null,
+    "generateUpdatesFilesForAllChannels": false
   },
   "dependencies": {
     "electron-log": "^5.4.3"
