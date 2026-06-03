@@ -192,7 +192,7 @@
       "shortcutName": "GuaDa",
       "differentialPackage": true,
       "deleteAppDataOnUninstall": true
-    },
+    }
   },
   "dependencies": {
     "electron-log": "^5.4.3"
