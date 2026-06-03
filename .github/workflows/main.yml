@@ -31,9 +31,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # ✅ 关键：删除了 ilammy/msvc-dev-cmd 步骤
-      # node-gyp 会自动检测并使用系统已安装的Visual Studio工具链
-
       - name: Install dependencies
         run: npm ci
 
@@ -42,8 +39,11 @@ jobs:
           $electronVersion = node -p "require('./package.json').devDependencies.electron"
           npm rebuild --runtime=electron --target=$electronVersion --disturl=https://electronjs.org/headers --arch=x64
 
+      # ✅ 修复：进入backend-ts目录后执行数据库初始化
       - name: Initialize database schema
-        run: npm run db:seed:force
+        run: |
+          cd backend-ts
+          npm run db:seed:force
 
       - name: Build Electron application
         run: npm run build:electron
