@@ -55,6 +55,7 @@
     "appId": "com.guada.app",
     "productName": "GuaDa",
     "npmRebuild": false,
+    "blockMap": false,
     "asar": {
       "smartUnpack": true
     },
@@ -151,8 +152,7 @@
       "icon": "icon.ico",
       "sign": null,
       "signDlls": false,
-      "forceCodeSigning": false,
-      "blockMap": false
+      "forceCodeSigning": false
     },
     "mac": {
       "target": [
@@ -192,8 +192,7 @@
       "createStartMenuShortcut": true,
       "shortcutName": "GuaDa",
       "differentialPackage": true,
-      "deleteAppDataOnUninstall": true,
-      "blockMap": false
+      "deleteAppDataOnUninstall": true
     },
     "publish": null,
     "generateUpdatesFilesForAllChannels": false
