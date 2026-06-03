@@ -151,7 +151,8 @@
       "icon": "icon.ico",
       "sign": null,
       "signDlls": false,
-      "forceCodeSigning": false
+      "forceCodeSigning": false,
+      "blockMap": false  // 添加这一行
     },
     "mac": {
       "target": [
@@ -191,8 +192,11 @@
       "createStartMenuShortcut": true,
       "shortcutName": "GuaDa",
       "differentialPackage": true,
-      "deleteAppDataOnUninstall": true
+      "deleteAppDataOnUninstall": true,
+      "blockMap": false  // 添加这一行
     }
+    "publish": null,  // 添加这一行
+    "generateUpdatesFilesForAllChannels": false  // 添加这一行
   },
   "dependencies": {
     "electron-log": "^5.4.3"
