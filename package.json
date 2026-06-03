@@ -194,7 +194,7 @@
       "differentialPackage": true,
       "deleteAppDataOnUninstall": true,
       "blockMap": false
-    }
+    },
     "publish": null,
     "generateUpdatesFilesForAllChannels": false
   },
