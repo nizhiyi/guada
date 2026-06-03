@@ -55,7 +55,6 @@
     "appId": "com.guada.app",
     "productName": "GuaDa",
     "npmRebuild": false,
-    "blockMap": false,
     "asar": {
       "smartUnpack": true
     },
