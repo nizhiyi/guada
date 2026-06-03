@@ -190,7 +190,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "GuaDa",
-      "differentialPackage": true,
+      "differentialPackage": false,
       "deleteAppDataOnUninstall": true
     },
     "publish": null,
