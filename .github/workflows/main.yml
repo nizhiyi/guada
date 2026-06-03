@@ -39,19 +39,14 @@ jobs:
           $electronVersion = node -p "require('./package.json').devDependencies.electron"
           npm rebuild --runtime=electron --target=$electronVersion --disturl=https://electronjs.org/headers --arch=x64
 
-      # ✅ 修复：进入backend-ts目录后执行数据库初始化
-      - name: Initialize database schema
-        run: |
-          cd backend-ts
-          npm run db:seed:force
-
+      # ✅ 关键：添加 --publish never 参数，禁用自动发布
       - name: Build Electron application
-        run: npm run build:electron
+        run: npm run build:electron -- --publish never
 
       - name: Upload Windows build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: GuaDa-AI-Windows-x64
-          path: release/GuaDa-AI-*.exe
+          path: release/GuaDa*.exe
           compression-level: 9
           if-no-files-found: error
