@@ -39,11 +39,14 @@ jobs:
           $electronVersion = node -p "require('./package.json').devDependencies.electron"
           npm rebuild --runtime=electron --target=$electronVersion --arch=x64
 
-      - name: Build Electron application
+      # ✅ 关键修复：执行完整的构建流程，通过环境变量禁用发布
+      - name: Build complete Electron application
         env:
           WIN_CSC_IDENTITY_AUTO_DISCOVERY: false
           ELECTRON: true
-        run: npm run build:electron:package -- --publish never
+          # 通过环境变量告诉electron-builder不要发布，完美解决参数传递问题
+          ELECTRON_BUILDER_PUBLISH: never
+        run: npm run build:electron
 
       - name: Upload Windows build artifacts
         uses: actions/upload-artifact@v4
