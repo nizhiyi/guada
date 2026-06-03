@@ -193,17 +193,6 @@
       "differentialPackage": true,
       "deleteAppDataOnUninstall": true
     },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "your-username",
-        "repo": "guada"
-      },
-      {
-        "provider": "generic",
-        "url": "https://ai.dingd.cn/updates/${os}"
-      }
-    ]
   },
   "dependencies": {
     "electron-log": "^5.4.3"
