@@ -8,6 +8,7 @@
  */
 
 import type { StreamEvent } from "@/types/service";
+import { getClientId } from "@/utils/clientId";
 
 /**
  * 流式对话参数
@@ -17,6 +18,7 @@ export interface ChatStreamParams {
   regenerationMode?: string | null;
   assistantMessageId?: string | null;
   resumeData?: any;
+  lastContentId?: string | null;
   // 用户消息参数
   // overwrite 模式：按需设置 content/files/replaceMessageId/knowledgeBaseIds，不设置 id
   // multi_version/resume/subscribe 模式：只需设置 id
@@ -58,6 +60,7 @@ export class ChatStreamService {
       regenerationMode = null,
       assistantMessageId = null,
       resumeData,
+      lastContentId,
       userMessage,
     } = params;
 
@@ -79,6 +82,7 @@ export class ChatStreamService {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
+          "X-Client-Id": getClientId(),
         },
         body: JSON.stringify({
           sessionId,
@@ -86,6 +90,7 @@ export class ChatStreamService {
           regenerationMode,
           stream: true,
           resumeData,
+          lastContentId,
           userMessage,
         }),
         signal: controller.signal,
@@ -174,7 +179,10 @@ export class ChatStreamService {
       const accessToken = this.getAccessToken();
       await fetch(`${this.getBaseURL()}/chat/stream/${sessionId}/stop`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "X-Client-Id": getClientId(),
+        },
       });
     } catch (error) {
       console.error("Failed to stop stream:", error);

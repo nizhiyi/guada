@@ -1,6 +1,7 @@
 <template>
-    <div class="bg-(--color-sidebar-bg) h-full">
-        <div class="h-full flex flex-col md:max-w-260 md:mx-auto">
+    <div class="h-full">
+        <PageHeader  title="系统设置" />
+        <div class="h-full flex flex-col md:max-w-220 md:mx-auto">
             <div class="flex-1 overflow-hidden flex flex-col ">
                 <div class="p-4">
                     <el-tabs v-model="currentTabValue" @tab-change="handleTabChange" class="system-settings-tabs">
@@ -19,11 +20,11 @@
                         <template v-if="currentTabValue === 'general'">
                             <GeneralSettings />
                         </template>
-                        <template v-else-if="currentTabValue === 'models'">
-                            <ModelsSettings />
-                        </template>
                         <template v-else-if="currentTabValue === 'default-models'">
                             <DefaultModelSettings />
+                        </template>
+                        <template v-else-if="currentTabValue === 'ocr'">
+                            <OcrSettings />
                         </template>
                         <template v-else-if="currentTabValue === 'about'">
                             <AboutPanel />
@@ -38,19 +39,20 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { ElTabs, ElTabPane } from 'element-plus'
-import ModelsSettings from './ModelsSettings.vue'
 import DefaultModelSettings from './DefaultModelSettings.vue'
 import GeneralSettings from './GeneralSettings.vue'
+import OcrSettings from './OcrSettings.vue'
 import AboutPanel from '../plugins/AboutPanel.vue'
 
 import {
-    CloudLink16Regular,
     Grid16Regular,
     Settings16Regular,
+    ScanText24Regular,
     Info24Regular
 } from '@vicons/fluent'
 
 import { useAuthStore } from '../../stores/auth'
+import PageHeader from '@/components/PageHeader.vue'
 import { useRouter, useRoute } from 'vue-router'
 
 const authStore = useAuthStore()
@@ -66,15 +68,15 @@ const sidebarItems = [
         roles: ['primary'],
     },
     {
-        label: '模型管理',
-        path: 'models',
-        icon: CloudLink16Regular,
-        roles: ['primary'],
-    },
-    {
         label: '默认模型',
         path: 'default-models',
         icon: Grid16Regular,
+        roles: ['primary'],
+    },
+    {
+        label: 'OCR 设置',
+        path: 'ocr',
+        icon: ScanText24Regular,
         roles: ['primary'],
     },
     {
@@ -103,7 +105,7 @@ const getDefaultTabPath = () => {
         }
         return false
     })
-    return firstValidItem?.path || 'models'
+    return firstValidItem?.path || 'general'
 }
 
 const currentTabValue = ref(getDefaultTabPath())

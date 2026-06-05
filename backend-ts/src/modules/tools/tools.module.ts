@@ -1,6 +1,9 @@
 import { Module, OnModuleInit, forwardRef } from "@nestjs/common";
+import { HttpModule } from "@nestjs/axios";
 import { VectorDbModule } from "../../common/vector-db/vector-db.module";
 import { SharedModule } from "../../common/services/shared.module";
+import { SettingsStorage } from "../../common/utils/settings-storage.util";
+import { SettingsService } from "../settings/settings.service";
 import { ToolOrchestrator } from "./tool-orchestrator.service";
 import { ToolContextFactory } from "./tool-context";
 import { KnowledgeBaseToolProvider } from "./providers/knowledge-base-tool.provider";
@@ -13,17 +16,19 @@ import { FileToolProvider } from "./providers/file-tool.provider";
 import { BrowserToolProvider } from "./providers/browser-tool.provider";
 import { SessionManagementToolProvider } from "./providers/session-management-tool.provider";
 import { SchedulerToolProvider } from "./providers/scheduler-tool.provider";
+import { DocumentToolProvider } from "./providers/document-tool.provider";
 import { EmbeddingService } from "../knowledge-base/embedding.service";
 import { KbFileService } from "../knowledge-base/kb-file.service";
 import { FileParserService } from "../knowledge-base/file-parser.service";
 import { ChunkingService } from "../knowledge-base/chunking.service";
+import { OcrService } from "../knowledge-base/ocr.service";
 
 import { SkillsModule } from '../skills/skills.module';
 import { SkillToolBridgeService } from '../skills/integration/skill-tool-bridge.service';
 import { SchedulerModule } from '../scheduler/scheduler.module';
 
 @Module({
-  imports: [VectorDbModule, SkillsModule, SharedModule, forwardRef(() => SchedulerModule)],
+  imports: [HttpModule, VectorDbModule, SkillsModule, SharedModule, forwardRef(() => SchedulerModule)],
   providers: [
     ToolOrchestrator,
     ToolContextFactory,
@@ -37,11 +42,15 @@ import { SchedulerModule } from '../scheduler/scheduler.module';
     BrowserToolProvider,
     SessionManagementToolProvider,
     SchedulerToolProvider,
+    DocumentToolProvider,
     SkillToolBridgeService,
     EmbeddingService,
     KbFileService,
     FileParserService,
     ChunkingService,
+    OcrService,
+    SettingsStorage,
+    SettingsService,
 
   ],
   exports: [ToolOrchestrator, ToolContextFactory],
@@ -59,6 +68,7 @@ export class ToolsModule implements OnModuleInit {
     private readonly browserProvider: BrowserToolProvider,
     private readonly sessionManagementProvider: SessionManagementToolProvider,
     private readonly schedulerProvider: SchedulerToolProvider,
+    private readonly documentProvider: DocumentToolProvider,
     private readonly skillToolBridge: SkillToolBridgeService,
   ) {}
 
@@ -82,6 +92,7 @@ export class ToolsModule implements OnModuleInit {
 
     this.toolOrchestrator.addProvider(this.sessionManagementProvider);
     this.toolOrchestrator.addProvider(this.schedulerProvider);
+    this.toolOrchestrator.addProvider(this.documentProvider);
     this.toolOrchestrator.addProvider(this.skillToolBridge);
   }
 }

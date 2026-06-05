@@ -91,13 +91,14 @@ class ContextMenuManager {
 
     // 创建菜单容器
     const menu = document.createElement('div')
+    const isDark = document.documentElement.classList.contains('dark')
     menu.className = 'global-context-menu'
     menu.style.cssText = `
       position: fixed;
       left: ${event.clientX}px;
       top: ${event.clientY}px;
-      background: white;
-      border: 1px solid #e4e7ed;
+      background: ${isDark ? '#1f1f1f' : 'white'};
+      border: 1px solid ${isDark ? '#1f1f1f' : '#e4e7ed'};
       border-radius: 4px;
       box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
       padding: 4px 0;
@@ -109,7 +110,7 @@ class ContextMenuManager {
     menuItems.forEach(item => {
       if (item.type === 'separator') {
         const separator = document.createElement('div')
-        separator.style.cssText = 'height: 1px; background: #e4e7ed; margin: 4px 0;'
+        separator.style.cssText = `height: 1px; background: ${isDark ? '#383a40' : '#e4e7ed'}; margin: 4px 0;`
         menu.appendChild(separator)
       } else {
         const menuItem = document.createElement('div')
@@ -119,12 +120,12 @@ class ContextMenuManager {
           padding: 8px 16px;
           cursor: pointer;
           font-size: 14px;
-          color: #606266;
+          color: ${isDark ? '#c5c7cc' : '#606266'};
           transition: background 0.2s;
         `
         
         menuItem.addEventListener('mouseenter', () => {
-          menuItem.style.background = '#f5f7fa'
+          menuItem.style.background = isDark ? '#2f3131' : '#f5f7fa'
         })
         
         menuItem.addEventListener('mouseleave', () => {
@@ -170,18 +171,43 @@ class ContextMenuManager {
   }
 
   /**
-   * 安全读取剪贴板文本（优先使用 Electron 原生 API）
+   * 安全读取剪贴板文本（优先使用 IPC 异步 API）
    */
-  private readClipboardText(): string {
-    if ((window as any).electronAPI?.clipboard?.readText) {
+  private async readClipboardText(): Promise<string> {
+    const win = window as any
+
+    // 优先使用 IPC 方式（更可靠）
+    if (win.electronAPI?.clipboardIPC?.readText) {
       try {
-        return (window as any).electronAPI.clipboard.readText()
+        const result = await win.electronAPI.clipboardIPC.readText()
+        if (result.success) {
+          return result.text || ''
+        }
+        console.warn('[ContextMenu] IPC 读取失败:', result.error)
       } catch (error) {
-        console.warn('[ContextMenu] Electron clipboard 失败，降级到 Web API:', error)
+        console.warn('[ContextMenu] IPC 调用异常:', error)
       }
     }
-    
-    // 降级到 Web API
+
+    // 回退：直接调用 preload 暴露的同步 API
+    if (win.electronAPI?.clipboard?.readText) {
+      try {
+        const text = win.electronAPI.clipboard.readText()
+        if (text) return text
+      } catch (error) {
+        console.warn('[ContextMenu] 同步 clipboard 调用失败:', error)
+      }
+    }
+
+    // 最后回退到 Web Clipboard API
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        return await navigator.clipboard.readText()
+      } catch (error) {
+        console.warn('[ContextMenu] Web API 读取失败:', error)
+      }
+    }
+
     return ''
   }
 
@@ -277,8 +303,8 @@ class ContextMenuManager {
       // 粘贴
       items.push({ 
         label: '粘贴', 
-        action: () => {
-          const text = this.readClipboardText()
+        action: async () => {
+          const text = await this.readClipboardText()
           if (!text) return
           
           if (isContentEditable) {

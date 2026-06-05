@@ -38,13 +38,13 @@
           </template>
           <template v-else>
             <div v-for="session in filteredSessions" :key="session.id"
-              class="session-item flex items-center gap-2.5 py-[0.4rem] px-2 mx-1 my-[0.2rem] rounded-lg cursor-pointer transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] group"
+              class="flex items-center gap-2.5 px-2 mx-1 my-[0.2rem] rounded-lg cursor-pointer transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] group"
               :class="{
                 'session-item-active': session.id === currentSessionId,
                 'session-item-inactive': session.id !== currentSessionId
               }" @click="selectSession(session)">
-              <Avatar class="session-avatar" :src="session.character?.avatarUrl || session.avatarUrl"
-                :name="session.character?.title || session.title" type="assistant" round />
+              <!-- <Avatar class="session-avatar" :src="session.character?.avatarUrl || session.avatarUrl"
+                :name="session.character?.title || session.title" type="assistant" round /> -->
 
               <div class="session-info flex-1 min-w-0 flex items-center">
                 <div class="session-title truncate text-sm font-medium w-full">

@@ -1,8 +1,9 @@
 <template>
-    <div class="bg-(--color-sidebar-bg) h-full overflow-auto mx-2">
-        <div class="h-full flex flex-col p-4">
+    <div class="h-full overflow-auto">
+        <PageHeader  title="插件" />
+        <div class="h-full px-4 flex flex-col">
             <div class="flex-1 flex flex-col">
-                <div class="sticky top-0 z-10 bg-(--color-sidebar-bg)">
+                <div class="sticky top-0 z-10 bg-(--color-bg)">
                     <el-tabs v-model="currentTabValue" @tab-change="handleTabChange" class="plugins-settings-tabs">
                         <el-tab-pane v-for="item in tabItems" :key="item.path" :label="item.label" :name="item.path">
                             <template #label>
@@ -43,6 +44,7 @@ import {
     Code24Regular
 } from '@vicons/fluent'
 
+import PageHeader from '@/components/PageHeader.vue'
 import { useRouter, useRoute } from 'vue-router'
 
 const router = useRouter()
@@ -50,11 +52,6 @@ const route = useRoute()
 
 // 插件设置 Tab 菜单
 const sidebarItems = [
-    {
-        label: 'MCP 服务器',
-        path: 'mcp',
-        icon: Dumbbell16Regular,
-    },
     {
         label: '本地工具',
         path: 'local-tools',
@@ -64,6 +61,11 @@ const sidebarItems = [
         label: 'Skills',
         path: 'skills',
         icon: Code24Regular,
+    },
+    {
+        label: 'MCP 服务器',
+        path: 'mcp',
+        icon: Dumbbell16Regular,
     },
 ]
 
