@@ -1,24 +1,29 @@
 <template>
 
   <!-- 输入区域 -->
-  <div class="px-5 pb-2.5 w-full flex-1 flex flex-col items-center justify-center mb-40">
-    <div class="w-full flex items-center justify-center mb-4">
-    <div class="banner w-30 mb-4">
-      <img :src="bannerPath" alt=""></img>
+  <div class="px-5 pb-2.5 w-full flex-1 flex flex-col items-center justify-center mb-20">
+    <div class="w-full flex items-center justify-center mb-10">
+      <div class="banner w-20 mb-4">
+        <img :src="bannerPath" alt=""></img>
+      </div>
+      <h1 class="text-4xl mb-6 text-(--color-text) ml-5">
+        <span class="typewriter-text">{{ displayedText }}</span>
+        <span class="typewriter-cursor" :class="{ 'cursor-blink': isTypingComplete }"></span>
+      </h1>
     </div>
-    <h1 class="text-4xl mb-6 text-gray-600 ml-10">Hi，想聊些什么？</h1>
-</div>
     <!-- 已选角色显示 -->
     <div
-      class="w-full max-w-200 -mb-6 flex items-center gap-3 p-2 pb-8 bg-gray-50 dark:bg-(--color-surface) border border-gray-100 dark:border-(--color-surface) rounded-lg cursor-pointer hover:bg-gray-100 dark:hover:bg-(--color-sidebar-bg-hover) transition-colors"
+      class="w-full max-w-200 -mb-6 flex items-center gap-3 p-2 pb-8 bg-gray-100 dark:bg-(--color-surface) border border-gray-100 dark:border-(--color-surface) rounded-2xl cursor-pointer hover:bg-gray-100 dark:hover:bg-(--color-sidebar-bg-hover) transition-colors"
       @click="showCharacterSelector = true">
       <div class="w-10 h-10 shrink-0 overflow-hidden rounded">
         <Avatar :src="currentCharacter?.avatarUrl" type="assistant" :name="currentCharacter?.title"
           class="w-full h-full object-cover" />
       </div>
       <div class="flex-1 min-w-0">
-        <p class="text-sm font-medium text-gray-700 dark:text-(--color-text) truncate">{{ currentCharacter?.title || '未命名角色' }}</p>
-        <p class="text-xs text-gray-500 dark:text-(--color-text-gray) truncate">{{ currentCharacter?.description || '暂无描述' }}</p>
+        <p class="text-sm font-medium text-gray-700 dark:text-(--color-text) truncate">{{ currentCharacter?.title ||
+          '未命名角色' }}</p>
+        <p class="text-xs text-gray-500 dark:text-(--color-text-gray) truncate">{{ currentCharacter?.description ||
+          '暂无描述' }}</p>
       </div>
       <el-icon class="text-gray-400 dark:text-(--color-text-gray) shrink-0">
         <ArrowRightTwotone />
@@ -26,23 +31,16 @@
     </div>
 
     <div class="w-full  max-w-200">
-      <ChatInput
-        v-model:value="inputMessage.content"
-        :config="chatInputConfig"
-        mode="create"
-        @config-change="handleConfigChange"
-        :buttons="chatInputButtons"
-        :files="inputMessage.files" 
-        :streaming="false"
-        @send="sendMessage" 
-      />
+      <ChatInput v-model:value="inputMessage.content" :config="chatInputConfig" mode="create"
+        @config-change="handleConfigChange" :buttons="chatInputButtons" :files="inputMessage.files" :streaming="false"
+        @send="sendMessage" />
     </div>
     <div>
-      <div class="flex items-center justify-center mt-6">
+      <!-- <div class="flex items-center justify-center mt-6">
         您也可以<span class="w-1"></span>
         <el-button type="primary" plain round size="small" @click="handleCreateSessionClick">直接创建会话
         </el-button>
-      </div>
+      </div> -->
     </div>
   </div>
 
@@ -71,9 +69,12 @@
         </div>
         <div class="flex-1 min-w-0">
           <p class="text-sm font-medium text-gray-700 dark:text-(--color-text) truncate">{{ character.title }}</p>
-          <p class="text-xs text-gray-500 dark:text-(--color-text-gray) truncate mt-1">{{ character.description || '暂无描述' }}</p>
+          <p class="text-xs text-gray-500 dark:text-(--color-text-gray) truncate mt-1">{{ character.description ||
+            '暂无描述' }}
+          </p>
         </div>
-        <el-icon v-if="currentSession.characterId === character.id" class="text-blue-500 dark:text-(--color-primary) shrink-0" size="20">
+        <el-icon v-if="currentSession.characterId === character.id"
+          class="text-blue-500 dark:text-(--color-primary) shrink-0" size="20">
           <CheckCircleFilled />
         </el-icon>
       </div>
@@ -104,7 +105,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useStorage } from "@vueuse/core"
 import { apiService } from '@/services/ApiService';
 import { usePopup } from "../../composables/usePopup";
@@ -162,6 +163,46 @@ const inputMessage = ref({
   files: []
 });
 
+// 打字机效果相关状态
+const fullText = 'Hi，想聊些什么？';
+const displayedText = ref('');
+const isTypingComplete = ref(false);
+let typeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 启动打字机效果
+ * 逐字显示文本，完成后启动光标闪烁
+ */
+const startTypewriter = (): void => {
+  let index = 0;
+  displayedText.value = '';
+  isTypingComplete.value = false;
+
+  const typeNextChar = (): void => {
+    if (index < fullText.length) {
+      displayedText.value += fullText[index];
+      index++;
+      // 随机延迟 80-150ms，模拟自然打字节奏
+      const delay = 80 + Math.random() * 70;
+      typeTimer = setTimeout(typeNextChar, delay);
+    } else {
+      isTypingComplete.value = true;
+    }
+  };
+
+  typeNextChar();
+};
+
+/**
+ * 清理打字机定时器
+ */
+const clearTypewriterTimer = (): void => {
+  if (typeTimer) {
+    clearTimeout(typeTimer);
+    typeTimer = null;
+  }
+};
+
 // 计算属性
 const currentSession = ref<any>({
   characterId: null,  // 必须绑定角色
@@ -211,17 +252,17 @@ const currentModelId = computed(() => {
   if (userSelectedModelId.value) {
     return userSelectedModelId.value;
   }
-  
+
   // 第二优先级：使用角色的默认模型
   if (currentCharacter.value?.model_id) {
     return currentCharacter.value.model_id;
   }
-  
+
   // 第三优先级：使用模型列表的第一个模型
   if (models.value.length > 0) {
     return models.value[0].id;
   }
-  
+
   // 兜底：返回 null
   return null;
 });
@@ -241,7 +282,7 @@ watch(() => currentSession.value.characterId, (newCharId, oldCharId) => {
     const newCharacter = characters.value.find(c => c.id === newCharId);
     if (newCharacter) {
       let selectedModelId: string | null = null;
-      
+
       // 第一优先级：角色的默认模型
       if (newCharacter.model_id) {
         selectedModelId = newCharacter.model_id;
@@ -256,12 +297,12 @@ watch(() => currentSession.value.characterId, (newCharId, oldCharId) => {
       else if (models.value.length > 0) {
         selectedModelId = models.value[0].id;
       }
-      
+
       // 设置模型 ID
       if (selectedModelId) {
         currentSession.value.model_id = selectedModelId;
       }
-      
+
       // 切换角色时，重置会话设置
       currentSession.value.settings = {
         ...(currentSession.value.settings || {}),
@@ -274,7 +315,7 @@ watch(() => currentSession.value.characterId, (newCharId, oldCharId) => {
           maxTokensLimit: newCharacter.settings?.memory?.maxTokensLimit || null
         }
       };
-      
+
       // 更新本地存储的配置信息
       if (selectedModelId) {
         lastModelConfig.value = {
@@ -347,13 +388,13 @@ const loadCharacters = async (): Promise<void> => {
 
       const savedCharacter = characters.value.find(c => c.id === lastSelectedCharacterId.value);
       const targetCharacter = savedCharacter || characters.value[0];
-      
+
       if (targetCharacter) {
         currentSession.value.characterId = targetCharacter.id;
-        
+
         // 三级回退逻辑确定模型 ID
         let selectedModelId: string | null = null;
-        
+
         // 第一优先级：用户手动选择的模型
         if (userSelectedModelId.value) {
           selectedModelId = userSelectedModelId.value;
@@ -366,12 +407,12 @@ const loadCharacters = async (): Promise<void> => {
         else if (models.value.length > 0) {
           selectedModelId = models.value[0].id;
         }
-        
+
         // 设置模型 ID
         if (selectedModelId) {
           currentSession.value.model_id = selectedModelId;
         }
-        
+
         // 设置会话配置
         currentSession.value.settings = {
           ...currentSession.value.settings,
@@ -384,7 +425,7 @@ const loadCharacters = async (): Promise<void> => {
             maxTokensLimit: targetCharacter.settings?.memory?.maxTokensLimit || null
           }
         };
-        
+
         // 同步更新 lastModelConfig，确保一致性
         if (selectedModelId) {
           lastModelConfig.value = {
@@ -412,10 +453,10 @@ const selectCharacter = (character: any): void => {
   lastSelectedCharacterId.value = character.id;
   showCharacterSelector.value = false;
   characterSearchText.value = '';
-  
+
   // 切换角色时的模型选择逻辑
   let selectedModelId: string | null = null;
-  
+
   // 第一优先级：角色的默认模型
   if (character.model_id) {
     selectedModelId = character.model_id;
@@ -430,12 +471,12 @@ const selectCharacter = (character: any): void => {
   else if (models.value.length > 0) {
     selectedModelId = models.value[0].id;
   }
-  
+
   // 设置模型 ID
   if (selectedModelId) {
     currentSession.value.model_id = selectedModelId;
   }
-  
+
   // 思考模型状态保持用户上次选择的状态
   currentSession.value.settings = {
     ...(currentSession.value.settings || {}),
@@ -448,7 +489,7 @@ const selectCharacter = (character: any): void => {
       maxTokensLimit: character.settings?.memory?.maxTokensLimit || null
     }
   };
-  
+
   // 更新本地存储的配置信息
   if (selectedModelId) {
     lastModelConfig.value = {
@@ -468,16 +509,16 @@ const selectCharacter = (character: any): void => {
 const chatInputConfig = computed(() => ({
   // 模型 ID - 对应 handleConfigChange 中的 config.modelId
   modelId: currentModelId.value,
-  
+
   // 思考强度 - 对应 handleConfigChange 中的 config.thinkingEffort
   thinkingEffort: currentSession.value?.settings?.thinkingEffort || 'off',
-  
+
   // 记忆配置开关 - 对应 handleConfigChange 中的 config.memoryEnabled
   memoryEnabled: currentSession.value?.settings?.memoryEnabled,
-  
+
   // 记忆配置详情 - 对应 handleConfigChange 中的 config.memory
   memory: currentSession.value?.settings?.memory || null,
-  
+
   // 知识库 IDs - 对应 handleConfigChange 中的 config.knowledgeBaseIds
   knowledgeBaseIds: currentSession.value?.settings?.referencedKbs || [],
 
@@ -497,7 +538,7 @@ const handleConfigChange = (config: any): void => {
     console.log('保存用户手动切换的模型:', config.modelId);
     userSelectedModelId.value = config.modelId;
   }
-  
+
   // 处理思考强度变更
   if (typeof config.thinkingEffort !== 'undefined') {
     currentSession.value.settings.thinkingEffort = config.thinkingEffort;
@@ -505,25 +546,25 @@ const handleConfigChange = (config: any): void => {
     userSelectedThinkingEffort.value = config.thinkingEffort;
     console.log('保存 thinkingEffort 到会话和本地存储:', config.thinkingEffort);
   }
-  
+
   // 处理记忆配置开关
   if (typeof config.memoryEnabled !== 'undefined') {
     currentSession.value.settings.memoryEnabled = config.memoryEnabled;
     console.log('保存 memoryEnabled 到会话:', config.memoryEnabled);
   }
-  
+
   // 处理记忆配置详情
   if (typeof config.memory !== 'undefined') {
-    currentSession.value.settings = { 
-      ...(currentSession.value.settings || {}), 
-      memory: { 
-        ...(currentSession.value.settings?.memory || {}), 
-        ...config.memory 
-      } 
+    currentSession.value.settings = {
+      ...(currentSession.value.settings || {}),
+      memory: {
+        ...(currentSession.value.settings?.memory || {}),
+        ...config.memory
+      }
     };
     console.log('保存 memory 配置到会话:', config.memory);
   }
-  
+
   // 处理知识库选择
   if (typeof config.knowledgeBaseIds !== 'undefined') {
     currentSession.value.settings = { ...(currentSession.value.settings || {}), referencedKbs: config.knowledgeBaseIds };
@@ -551,6 +592,12 @@ onMounted(() => {
   Promise.all([loadModels(), loadCharacters()]).catch(error => {
     console.error('初始化数据失败:', error);
   });
+  // 启动打字机效果
+  startTypewriter();
+});
+
+onUnmounted(() => {
+  clearTypewriterTimer();
 });
 
 const autoTitle = (): string => {
@@ -596,3 +643,32 @@ const handleCreateSessionClick = (): void => {
 // 设置操作
 
 </script>
+
+<style scoped>
+/* 打字机光标样式 */
+.typewriter-cursor {
+  display: inline-block;
+  width: 3px;
+  height: 1em;
+  background-color: currentColor;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  opacity: 1;
+  position: relative;
+  top: -4px;
+}
+
+/* 光标闪烁动画 */
+.cursor-blink {
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+</style>

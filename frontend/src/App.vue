@@ -5,6 +5,7 @@
 
     <!-- 自定义标题栏（仅在 Electron 环境显示） -->
     <div class="flex flex-col h-full">
+        <div class="wallpaper-blur-layer"></div>
         <CustomTitlebar @open-guide="openGuide" />
         <SetupGuide ref="guideRef" />
         <RouterView></RouterView>
@@ -46,12 +47,12 @@ watch(
             // 800ms 后开始淡出
             setTimeout(() => {
                 isTransitioning.value = false
-            }, 800)
+            }, 400)
 
             // 1000ms 后完全移除遮罩
             setTimeout(() => {
                 showThemeTransition.value = false
-            }, 1000)
+            }, 700)
         }
     }
 )

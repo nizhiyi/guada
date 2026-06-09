@@ -11,7 +11,9 @@ export const useSessionStore = defineStore('session', () => {
     const activeSessionId: Ref<string | null> = ref(null)
     const sessionsList: Ref<Session[]> = ref([])
     const sessions: Ref<Map<string, SessionState>> = ref(new Map())
-    const pendingStreamSession: Ref<{ sessionId: string; replaceMessageId?: string } | null> = ref(null)
+
+    // 会话侧边栏状态（未读 / 工作中）
+    const sessionSidebarStates: Ref<Map<string, { unread: boolean; working: boolean }>> = ref(new Map())
 
     /**
      * 获取或初始化会话状态
@@ -236,28 +238,94 @@ export const useSessionStore = defineStore('session', () => {
         }
     }
 
+    // === 侧边栏状态管理 ===
+
+    /**
+     * 获取或初始化侧边栏状态
+     * @param sessionId - 会话 ID
+     */
+    const getSidebarState = (sessionId: string): { unread: boolean; working: boolean } => {
+        if (!sessionSidebarStates.value.has(sessionId)) {
+            sessionSidebarStates.value.set(sessionId, { unread: false, working: false })
+        }
+        return sessionSidebarStates.value.get(sessionId)!
+    }
+
+    /**
+     * 标记会话为未读
+     * @param sessionId - 会话 ID
+     */
+    const markSessionUnread = (sessionId: string): void => {
+        getSidebarState(sessionId).unread = true
+    }
+
+    /**
+     * 标记会话为已读
+     * @param sessionId - 会话 ID
+     */
+    const markSessionRead = (sessionId: string): void => {
+        getSidebarState(sessionId).unread = false
+    }
+
+    /**
+     * 标记会话为工作中（流式响应中）
+     * @param sessionId - 会话 ID
+     */
+    const markSessionWorking = (sessionId: string): void => {
+        getSidebarState(sessionId).working = true
+    }
+
+    /**
+     * 标记会话为空闲（流式响应结束）
+     * @param sessionId - 会话 ID
+     */
+    const markSessionIdle = (sessionId: string): void => {
+        getSidebarState(sessionId).working = false
+    }
+
+    /**
+     * 检查会话是否未读
+     * @param sessionId - 会话 ID
+     */
+    const isSessionUnread = (sessionId: string): boolean => {
+        return getSidebarState(sessionId).unread
+    }
+
+    /**
+     * 检查会话是否工作中
+     * @param sessionId - 会话 ID
+     */
+    const isSessionWorking = (sessionId: string): boolean => {
+        return getSidebarState(sessionId).working
+    }
+
+    /**
+     * 同步后端流式状态到侧边栏状态
+     * 用于页面加载时初始化 working 状态
+     * @param sessionId - 会话 ID
+     * @param isStreaming - 后端返回的流式状态
+     */
+    const syncStreamingState = (sessionId: string, isStreaming: boolean): void => {
+        getSidebarState(sessionId).working = isStreaming
+    }
+
+    /**
+     * 清理侧边栏状态（删除会话时调用）
+     * @param sessionId - 会话 ID
+     */
+    const clearSidebarState = (sessionId: string): void => {
+        sessionSidebarStates.value.delete(sessionId)
+    }
+
+    // =====================
+
     /**
      * 清理会话状态（删除会话时调用）
      * @param sessionId - 会话 ID
      */
     const clearSessionState = (sessionId: string): void => {
         sessions.value.delete(sessionId)
-    }
-
-    /**
-     * 设置待处理的流会话（用于触发 ChatPanel 订阅流）
-     * @param sessionId - 会话 ID
-     * @param replaceMessageId - 需要替换的消息 ID
-     */
-    const setPendingStreamSession = (sessionId: string, replaceMessageId?: string): void => {
-        pendingStreamSession.value = { sessionId, replaceMessageId }
-    }
-
-    /**
-     * 清除待处理的流会话
-     */
-    const clearPendingStreamSession = (): void => {
-        pendingStreamSession.value = null
+        clearSidebarState(sessionId)
     }
 
     return {
@@ -265,7 +333,7 @@ export const useSessionStore = defineStore('session', () => {
         activeSessionId,
         sessionsList,
         sessions,
-        pendingStreamSession,
+        sessionSidebarStates,
 
         // actions
         getSessionState,
@@ -289,7 +357,14 @@ export const useSessionStore = defineStore('session', () => {
         updateSessionTitle,
         updateSessionLastActiveTime,
         clearSessionState,
-        setPendingStreamSession,
-        clearPendingStreamSession
+        getSidebarState,
+        markSessionUnread,
+        markSessionRead,
+        markSessionWorking,
+        markSessionIdle,
+        isSessionUnread,
+        isSessionWorking,
+        syncStreamingState,
+        clearSidebarState
     }
 })
