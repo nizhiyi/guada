@@ -126,35 +126,18 @@ export class MessageStoreService implements IMessageStore {
       if (!records || records.length === 0) return [];
 
       for (const record of records) {
-        // 构建元数据对象，提取关键的性能和状态信息
+        // 透传整个 metadata 对象，所有关键字段（modelName、finishReason、usage、signature 等）
+        // 已在流结束阶段由各模块负责写入 record.metadata，此处无需逐个字段手动拷贝
         const metadata: any = {
+          ...(record.metadata || {}),
           modelName: record.metadata?.modelName || "",
           finishReason: record.metadata?.finishReason || "",
         };
 
-        // 条件性地添加可选元数据字段，避免存储 null 或 undefined 值
-        if (record.metadata?.error) {
-          metadata.error = record.metadata?.error;
-        }
-
-        // 思维链耗时仅在存在时记录，用于性能分析和优化
-        if (
-          record.metadata?.thinkingDurationMs !== null &&
-          record.metadata?.thinkingDurationMs !== undefined
-        ) {
-          metadata.thinkingDurationMs = record.metadata?.thinkingDurationMs;
-        }
-
-        // Token 使用量统计，用于成本核算和配额管理
-        if (record.metadata?.usage) {
-          metadata.usage = record.metadata?.usage;
-        }
-
-        // 工具调用信息和 ID，用于追踪函数执行流程
+        // 工具调用信息和 ID 属于消息记录级别，补充到 metadata 中
         if (record.toolCalls) {
           metadata.toolCalls = record.toolCalls;
         }
-
         if (record.toolCallId) {
           metadata.toolCallId = record.toolCallId;
         }
@@ -367,9 +350,21 @@ export class MessageStoreService implements IMessageStore {
           },
         ];
 
-      const textParts: MessagePart[] = [
-        { type: "text", text: activeContent.content || "" },
-      ];
+      let userContent = activeContent.content || "";
+
+      // 非普通聊天消息（如子代理、定时任务等），使用 XML 标签包装来源信息
+      // metadata 是平铺存储的，source 字段不存在，直接用 metadata 判断
+      const meta = msg.metadata;
+      if (
+        meta &&
+        typeof meta === "object" &&
+        meta.type &&
+        meta.type !== "client"
+      ) {
+        userContent = this.wrapSystemMessage(meta, userContent);
+      }
+
+      const textParts: MessagePart[] = [{ type: "text", text: userContent }];
 
       let metadata = {};
       // 仅为最新的用户消息注入知识库引用信息，避免历史消息重复携带冗余数据
@@ -543,5 +538,37 @@ export class MessageStoreService implements IMessageStore {
       `</ATTACHMENT_FILE>\n`;
 
     return { type: "text", text: fileText };
+  }
+
+  /**
+   * 将系统消息 metadata 包装为 XML 格式
+   *
+   * 存在 systemPayload 数组时，每个元素生成独立的 <payload> 块，忽略原始 content。
+   * 无 systemPayload 时，回退到旧逻辑，将 type 和其他字段平铺为标签。
+   *
+   * @param meta 消息 metadata 对象
+   * @param userContent 原始用户内容，用于无 systemPayload 时回退
+   * @returns 包装后的 XML 字符串
+   */
+  private wrapSystemMessage(meta: any, userContent: string): string {
+    const systemPayload = meta.systemPayload;
+    if (Array.isArray(systemPayload) && systemPayload.length > 0) {
+      const payloadXml = systemPayload
+        .map((payload: any) => {
+          const entries = Object.entries(payload)
+            .map(([key, value]) => `<${key}>${value}</${key}>`)
+            .join("");
+          return `<payload>${entries}</payload>`;
+        })
+        .join("");
+      return `<system_message note="This message is automatically triggered by the system" type="${meta.type}">${payloadXml}</system_message>`;
+    }
+
+    // 无 systemPayload 时，回退到旧逻辑
+    const { type, ...rest } = meta;
+    const tags = Object.entries(rest)
+      .map(([key, value]) => `<${key}>${value}</${key}>`)
+      .join("");
+    return `<system_message note="This message is automatically triggered by the system" type="${type}">${tags}<content>${userContent}</content></system_message>`;
   }
 }

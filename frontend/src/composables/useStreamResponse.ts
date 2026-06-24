@@ -52,9 +52,11 @@ interface StreamResponse {
   turnsId?: string;
   contentId?: string;
   modelName?: string;
-  msg?: string;
+  content?: string;
+  reasoningContent?: string;
   toolCalls?: any[];
   toolCallsResponse?: any[];
+  displayMessages?: any[];
   usage?: any;
   finishReason?: string;
   error?: string;
@@ -280,7 +282,6 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
   function handleToolCall(
     content: MessageContent,
     toolCalls: any[],
-    displayMessages?: any[],
   ): void {
     // 初始化 metadata
     if (!content.metadata) {
@@ -301,9 +302,8 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
 
       if (!existingToolCall) {
         // 如果是新的工具调用，添加到列表
-        // 需要找到 toolCall 在 toolCalls 数组中的局部索引
-        const localIndex = toolCalls.findIndex((tc) => tc.index === index);
-        const displayMessage = displayMessages?.[localIndex] || null;
+        // 直接从 toolCall.metadata.displayMessage 获取展示消息
+        const displayMessage = toolCall.metadata?.displayMessage || null;
 
         content.metadata.toolCalls.push({
           id: toolCall.id,
@@ -312,7 +312,7 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
           name: toolCall.name,
           arguments: toolCall.arguments || "",
           metadata: {
-            displayMessage: displayMessage, // 存储结构化的展示信息到 metadata
+            displayMessage: displayMessage,
           },
         });
       } else {
@@ -320,31 +320,14 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
         if (toolCall.arguments !== null && toolCall.arguments !== undefined) {
           existingToolCall.arguments += toolCall.arguments;
         }
-        // 更新展示文案（如果提供）
-        if (displayMessages?.[index]) {
-          // 确保 metadata 存在
-          if (!existingToolCall.metadata) {
-            existingToolCall.metadata = {};
-          }
-          existingToolCall.metadata.displayMessage = displayMessages[index];
-        } else if (displayMessages) {
-          // displayMessages 数组可能只包含当前 chunk 中的工具
-          // 需要找到 toolCall 在 toolCalls 数组中的局部索引
-          const localIndex = toolCalls.findIndex((tc) => tc.index === index);
-          if (localIndex !== -1 && displayMessages[localIndex]) {
-            if (!existingToolCall.metadata) {
-              existingToolCall.metadata = {};
-            }
-            existingToolCall.metadata.displayMessage =
-              displayMessages[localIndex];
-          }
-        }
       }
     }
   }
 
   /**
    * 处理工具调用响应
+   * 从 tool_calls_response 事件接收执行完毕后的展示文案，更新到 toolCalls metadata 中
+   * （文案不持久化到工具结果，仅通过事件传送给前端更新显示状态）
    */
   function handleToolCallsResponse(
     content: MessageContent,
@@ -356,16 +339,16 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
     }
     content.metadata.toolCallsResponse = toolCallsResponse;
 
-    // 更新展示文案为完成状态
-    if (displayMessages && content.metadata.toolCalls) {
-      for (let i = 0; i < content.metadata.toolCalls.length; i++) {
-        if (displayMessages[i]) {
-          // 确保 metadata 存在
-          if (!content.metadata.toolCalls[i].metadata) {
+    // 更新展示文案为完成状态（从 tool_calls_response 携带的最新文案）
+    if (displayMessages && displayMessages.length > 0 && content.metadata.toolCalls) {
+      for (let i = 0; i < displayMessages.length; i++) {
+        const dm = displayMessages[i];
+        if (dm) {
+          if (!content.metadata.toolCalls[i]?.metadata) {
+            if (!content.metadata.toolCalls[i]) continue;
             content.metadata.toolCalls[i].metadata = {};
           }
-          content.metadata.toolCalls[i].metadata.displayMessage =
-            displayMessages[i];
+          content.metadata.toolCalls[i].metadata.displayMessage = dm;
         }
       }
     }
@@ -407,36 +390,45 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
 
     const content = message.contents[contentIndex];
 
+    // finish 携带完整内容时，直接覆盖（天然聚合）
+    if (response.content !== undefined) {
+      content.content = response.content;
+    }
+    if (response.reasoningContent !== undefined) {
+      content.reasoningContent = response.reasoningContent;
+    }
+
+    const metadata = content.metadata || {};
+
+    if (response.toolCalls && response.toolCalls.length > 0) {
+      metadata.toolCalls = response.toolCalls.map((tc: any) => ({
+        id: tc.id,
+        index: tc.index,
+        type: tc.type,
+        name: tc.name,
+        arguments: tc.arguments || "",
+        metadata: tc.metadata || {},
+      }));
+    }
+
     // 保存 usage 信息到 metadata.usage
     if (response.usage) {
-      content.metadata = {
-        ...content.metadata,
-        usage: response.usage,
-      };
+      metadata.usage = response.usage;
     }
 
     // 保存 finishReason
     if (response.finishReason) {
-      content.metadata = {
-        ...content.metadata,
-        finishReason: response.finishReason,
-      };
+      metadata.finishReason = response.finishReason;
     }
 
     // 处理错误情况
     if (response.finishReason === "error") {
       console.error("Error in stream:", response.error);
-      content.metadata = {
-        ...content.metadata,
-        error: response.error,
-        finishReason: response.finishReason,
-      };
-      // 错误时也要强制 flush，确保内容同步
-      forceFlushContent(message, contentIndex);
-      content.state.isStreaming = false;
-      content.state.isThinking = false;
-      return;
+      metadata.error = response.error;
+      metadata.finishReason = response.finishReason;
     }
+
+    content.metadata = metadata;
 
     // 正常结束，强制 flush 缓冲区内容并清理
     forceFlushContent(message, contentIndex);
@@ -617,7 +609,7 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
         }
 
         if (response.type === "think") {
-          thinkingContent += response.msg;
+          thinkingContent += response.reasoningContent;
           if (message)
             handleThink(
               message.contents[contentIndex],
@@ -641,8 +633,7 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
           handleToolCall(
             message!.contents[contentIndex],
             response.toolCalls,
-            response.displayMessages,
-          ); // 驼峰式
+          );
           continue;
         }
 
@@ -652,13 +643,13 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
             message!.contents[contentIndex],
             response.toolCallsResponse,
             response.displayMessages,
-          ); // 驼峰式
+          );
           continue;
         }
 
         // 处理文本内容
         if (response.type === "text") {
-          responseContent = responseContent + response.msg;
+          responseContent = responseContent + response.content;
           handleText(
             message!.contents[contentIndex],
             responseContent,
@@ -671,16 +662,19 @@ export function useStreamResponse(sessionStore: any, apiService: any) {
         // 处理压缩开始事件
         if (response.type === "compression_start") {
           sessionStore.setSessionIsCompressing(streamingSessionId, true);
-          toast.info(response.msg || "正在优化对话历史...");
+          toast.info(response.content || "正在优化对话历史...");
           continue;
         }
 
         // 处理压缩错误事件
         if (response.type === "compression_error") {
           sessionStore.setSessionIsCompressing(streamingSessionId, false);
-          toast.error(response.msg || "自动压缩失败");
+          toast.error(response.content || "自动压缩失败");
           continue;
         }
+
+        // 注意：sub_agent_start / sub_agent_finish 事件通过 SessionEventsService
+        // 全局广播（SSE 用户级事件流），不经过消息流，因此此处无需处理。
       }
     } catch (error) {
       handleStreamCatchError(

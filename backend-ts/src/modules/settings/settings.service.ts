@@ -4,7 +4,7 @@ import { SettingsStorage } from '../../common/utils/settings-storage.util';
 import {
   SG_SYSTEM,
   SG_MODELS,
-  SG_TOOLS,
+  SG_PLUGINS,
   SG_OCR,
   SG_APPEARANCE,
   SK_SYS_WORKSPACE_BASE_DIR,
@@ -27,7 +27,7 @@ export class SettingsService {
    * 更新分组内的一个或多个设置项，并自动保存
    */
   async updateGroupSettings(group: string, data: Record<string, any>): Promise<void> {
-    this.storage.updateSettings(group, data);
+    await this.storage.updateSettings(group, data);
   }
 
   /**
@@ -42,12 +42,12 @@ export class SettingsService {
    */
   async getSettings() {
     const result: Record<string, any> = {};
-    const groups = [SG_SYSTEM, SG_MODELS, SG_TOOLS, SG_OCR, SG_APPEARANCE];
+    const groups = [SG_SYSTEM, SG_MODELS, SG_PLUGINS, SG_OCR, SG_APPEARANCE];
 
     for (const group of groups) {
       const groupData = await this.getGroupSettings(group);
-      if (group === SG_TOOLS) {
-        result['tools'] = groupData;
+      if (group === SG_PLUGINS) {
+        result['plugins'] = groupData;
       } else if (group === SG_OCR) {
         result['ocr'] = groupData;
       } else if (group === SG_APPEARANCE) {

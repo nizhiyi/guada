@@ -92,34 +92,33 @@ export class CharactersController {
   async getCharacterTools(@Param("id") characterId: string) {
     const isNewCharacter = characterId === "__new_character__";
 
-    let characterToolsConfig: any;
+    let characterPluginConfig: any;
 
     if (isNewCharacter) {
       // 创建角色模式：默认禁用所有工具，由用户手动开启
-      characterToolsConfig = false;
+      characterPluginConfig = {};
     } else {
       const character =
         await this.characterService.getCharacterById(characterId);
       if (!character) {
         throw new Error("Character not found");
       }
-      characterToolsConfig = (character.settings as any)?.tools;
+      characterPluginConfig = (character.settings as any)?.tools;
     }
 
-    const allTools = await this.toolOrchestrator.getLocalToolsList();
+    const allTools =
+      await this.toolOrchestrator.getLocalToolsList(characterPluginConfig);
 
     // 过滤掉全局禁用的工具，不显示在角色配置界面
-    const enabledTools = allTools.filter((tool) => tool.enabled);
+    const enabledTools = allTools.filter(
+      (tool) => !(tool.enabled === false && tool.effective === "global"),
+    );
 
     return {
       characterId,
-      characterTools: characterToolsConfig,
-      tools: enabledTools.map((tool) => ({
+      plugins: enabledTools.map((tool) => ({
         ...tool,
-        effectiveEnabled: this.calculateEffectiveEnabled(
-          characterToolsConfig,
-          tool.namespace,
-        ),
+        effectiveEnabled: tool.enabled,
       })),
     };
   }
@@ -134,12 +133,12 @@ export class CharactersController {
    * 1. 如果角色设置为 true，则启用（跟随全局，自动适应新增工具）
    * 2. 如果角色设置为 false，则禁用
    * 3. 如果角色设置为数组，表示部分启用（至少有一个工具启用就算启用）
-   * 4. 如果角色设置为对象，则取 namespace 的配置（未设置默认为 false）
+   * 4. 如果角色设置为对象，则取 pluginId 的配置（未设置默认为 false）
    * 5. 如果角色未设置，则默认禁用
    */
   private calculateEffectiveEnabled(
     characterTools: any,
-    namespace: string,
+    pluginId: string,
   ): boolean {
     // 角色设置为 true，启用（跟随全局，自动适应新增工具）
     if (characterTools === true) {
@@ -156,9 +155,9 @@ export class CharactersController {
       return characterTools.length > 0;
     }
 
-    // 角色设置为对象，取 namespace 的配置
+    // 角色设置为对象，取 pluginId 的配置
     if (typeof characterTools === "object" && characterTools !== null) {
-      const charValue = characterTools[namespace];
+      const charValue = characterTools[pluginId];
 
       // 如果是数组，至少有一个工具启用就算启用
       if (Array.isArray(charValue)) {

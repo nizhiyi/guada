@@ -1,201 +1,174 @@
 <template>
     <div class="workspace-sidebar h-full flex flex-col border-l border-gray-200 dark:border-[#2e3035]">
-        <!-- 可拖拽分割区域 -->
-        <LiteSplitpanes class="flex-1" :horizontal="!isHorizontalLayout"
-            :pane1="{ size: selectedFile ? '280px' : '100%', minSize: '220px', maxSize: '600px' }"
-            :pane2="{ size: selectedFile ? 'auto' : '0px', minSize: selectedFile ? '120px' : '0px', maxSize: 100 }">
-            <template #pane1>
-                <div class="h-full flex flex-col">
-                    <!-- 浏览器窗口列表（仅 Electron 环境，置于最上方确保可见） -->
-                    <SessionBrowserWindowList v-if="isElectron" :session-id="props.sessionId" />
-
-                    <!-- 头部（仅在左侧目录树显示） -->
-                    <div
-                        class="shrink-0 flex items-center justify-between px-2 py-1.5 border-b border-gray-200 dark:border-[#2e3035]">
-                        <h3 class="text-sm font-semibold text-gray-700 dark:text-[#e8e9ed] whitespace-nowrap mr-1.5">
-                            工作目录</h3>
-                        <div class="flex items-center gap-0 shrink-0">
-                            <!-- 更换工作目录按钮 -->
-                            <el-tooltip content="更换工作目录" placement="bottom">
-                                <el-button class="workspace-tool-btn" text @click="changeWorkspacePath">
-                                    <el-icon size="16">
-                                        <Switch />
-                                    </el-icon>
-                                </el-button>
-                            </el-tooltip>
-                            <!-- 打开文件夹按钮（仅 Electron 环境） -->
-                            <el-tooltip v-if="isElectron" content="在文件管理器中打开" placement="bottom">
-                                <el-button class="workspace-tool-btn" text @click="openInFileManager">
-                                    <el-icon size="16">
-                                        <FolderOpened />
-                                    </el-icon>
-                                </el-button>
-                            </el-tooltip>
-                            <!-- 布局切换按钮 -->
-                            <el-tooltip :content="isHorizontalLayout ? '切换为上下布局' : '切换为左右布局'" placement="bottom">
-                                <el-button class="workspace-tool-btn" text @click="toggleLayout">
-                                    <el-icon size="16">
-                                        <component :is="isHorizontalLayout ? SplitVerticalIcon : SplitHorizontalIcon" />
-                                    </el-icon>
-                                </el-button>
-                            </el-tooltip>
-                            <!-- 刷新按钮 -->
-                            <el-tooltip content="刷新" placement="bottom">
-                                <el-button class="workspace-tool-btn" text @click="refreshTree" :loading="isLoading">
-                                    <el-icon size="16">
-                                        <Refresh />
-                                    </el-icon>
-                                </el-button>
-                            </el-tooltip>
-                        </div>
-                    </div>
-
-                    <!-- 目录树内容 -->
-                    <div class="flex-1 overflow-auto min-w-0">
-                        <div v-if="!treeData.length" class="text-center py-8 text-gray-400 text-sm p-2">
-                            暂无文件
-                        </div>
-
-                        <el-tree v-else ref="treeRef" :key="treeKey" :data="treeData" :props="treeProps" node-key="path"
-                            :expand-on-click-node="true" :default-expanded-keys="expandedKeys" :lazy="true"
-                            :load="loadNode" @node-click="handleTreeNodeClick" @node-expand="onNodeExpand"
-                            @node-collapse="onNodeCollapse" @node-contextmenu="handleNodeContextMenu" highlight-current
-                            class="workspace-tree min-w-fit p-2">
-                            <template #default="{ node, data }">
-                                <span class="workspace-tree-node">
-                                    <el-icon v-if="data.isDirectory" class="mr-1">
-                                        <Folder />
-                                    </el-icon>
-                                    <el-icon v-else class="mr-1">
-                                        <Document />
-                                    </el-icon>
-                                    {{ node.label }}
-                                </span>
-                            </template>
-                        </el-tree>
-                    </div>
-                </div>
-            </template>
-
-            <!-- 文件预览面板 -->
-            <template #pane2>
-                <div v-if="selectedFile" class="flex flex-col h-full w-full overflow-hidden">
-                    <!-- 标题栏 -->
-                    <div
-                        class="shrink-0 flex items-center justify-between px-2 py-1.5 bg-gray-50 dark:bg-[#2a2c30] border-b border-gray-200 dark:border-[#2e3035]">
-                        <span class="text-xs font-medium text-gray-600 dark:text-[#8b8d95] truncate">
-                            {{ selectedFile.name }}
-                        </span>
-
-                        <div class="flex items-center gap-2">
-                            <!-- 预览/源码切换按钮（仅 md 和 html） -->
-                            <el-button-group v-if="canTogglePreview">
-                                <el-button size="small" :type="currentPreviewMode === 'rendered' ? 'primary' : ''"
-                                    @click="currentPreviewMode = 'rendered'">
-                                    预览
-                                </el-button>
-                                <el-button size="small" :type="currentPreviewMode === 'source' ? 'primary' : ''"
-                                    @click="currentPreviewMode = 'source'">
-                                    源码
-                                </el-button>
-                            </el-button-group>
-
-                            <!-- 关闭按钮 -->
-                            <el-button :icon="Close" circle size="small" @click="closePreview" />
-                        </div>
-                    </div>
-
-                    <div class="flex-1 flex overflow-auto min-h-0">
-                        <div v-if="previewLoading" class="flex items-center justify-center h-full">
-                            <el-icon class="is-loading" size="20">
-                                <LoadingOutlined />
+        <!-- 目录树（预览时隐藏，v-show 保留 DOM） -->
+        <div v-show="!selectedFile" class="h-full flex flex-col flex-1 min-h-0">
+            <!-- 浏览器窗口列表（仅 Electron 环境，置于最上方确保可见） -->
+            <SessionBrowserWindowList v-if="isElectron" :session-id="props.sessionId" />
+            <div class="border-b border-gray-100 dark:border-[#2e3035] mx-4 mt-3"></div>
+            <!-- 头部 -->
+            <div
+                class="shrink-0 flex items-center justify-between px-2 py-3 ">
+                <h3 class="text-sm font-normal text-gray-500 dark:text-[#8b8d95] whitespace-nowrap mx-2">
+                    工作目录</h3>
+                <div class="flex items-center gap-0 shrink-0">
+                    <!-- 更换工作目录按钮 -->
+                    <el-tooltip content="更换工作目录" placement="bottom">
+                        <el-button class="workspace-tool-btn" text @click="changeWorkspacePath">
+                            <el-icon size="16">
+                                <Switch />
                             </el-icon>
-                        </div>
+                        </el-button>
+                    </el-tooltip>
+                    <!-- 打开文件夹按钮（仅 Electron 环境） -->
+                    <el-tooltip v-if="isElectron" content="在文件管理器中打开" placement="bottom">
+                        <el-button class="workspace-tool-btn" text @click="openInFileManager">
+                            <el-icon size="16">
+                                <FolderOpened />
+                            </el-icon>
+                        </el-button>
+                    </el-tooltip>
+                    <!-- 刷新按钮 -->
+                    <el-tooltip content="刷新" placement="bottom">
+                        <el-button class="workspace-tool-btn" text @click="refreshTree" :loading="isLoading">
+                            <el-icon size="16">
+                                <Refresh />
+                            </el-icon>
+                        </el-button>
+                    </el-tooltip>
+                </div>
+            </div>
 
-                        <div v-else-if="previewError" class="text-red-500 text-sm p-4">
-                            {{ previewError }}
-                        </div>
+            <!-- 目录树内容 -->
+            <div class="flex-1 overflow-auto min-w-0">
+                <div v-if="!treeData.length" class="text-center py-12 text-gray-400 dark:text-[#6b6d73] text-xs p-2">
+                    暂无文件，请先设置工作目录
+                </div>
 
-                        <div v-else class="w-full min-h-0">
-                            <!-- HTML 预览模式 -->
-                            <iframe v-if="isHtmlFile && currentPreviewMode === 'rendered'" :srcdoc="fileContent"
-                                class="w-full border-0" style="height: 100%;"
-                                sandbox="allow-same-origin allow-scripts" />
+                <WorkspaceTree
+                    v-else
+                    :nodes="treeData"
+                    :selected-path="selectedNodePath"
+                    :loading-paths="loadingPaths"
+                    :on-load="(node) => handleTreeNodeToggle(node, true)"
+                    @select="handleTreeNodeSelect"
+                    @toggle="handleTreeNodeExpandToggle"
+                    @contextmenu="handleContextMenu"
+                />
+            </div>
+        </div>
 
-                            <!-- Markdown 渲染模式 -->
-                            <div v-else-if="isMarkdownFile && currentPreviewMode === 'rendered'"
-                                class="markdown-preview markdown-text" v-html="renderedContent" />
+        <!-- 文件预览面板（全屏覆盖，v-show 保留目录树 DOM） -->
+        <div v-show="selectedFile" class="flex flex-col h-full w-full  flex-1">
+            <!-- 标题栏 -->
+            <div
+                class="shrink-0 flex items-center justify-between px-2 py-1.5 bg-gray-50 dark:bg-[#2a2c30] border-b border-gray-200 dark:border-[#2e3035]">
+                <span class="text-xs font-medium text-gray-600 dark:text-[#8b8d95] truncate">
+                    {{ selectedFile?.name }}
+                </span>
 
-                            <!-- 源码模式（带语法高亮）- 所有支持的文件类型 -->
-                            <div v-else-if="renderedContent" class="code-preview-container" v-html="renderedContent" />
+                <div class="flex items-center gap-2">
+                    <!-- 预览/源码切换按钮（仅 md 和 html） -->
+                    <el-button-group v-if="canTogglePreview">
+                        <el-button size="small" :type="currentPreviewMode === 'rendered' ? 'primary' : ''"
+                            @click="currentPreviewMode = 'rendered'">
+                            预览
+                        </el-button>
+                        <el-button size="small" :type="currentPreviewMode === 'source' ? 'primary' : ''"
+                            @click="currentPreviewMode = 'source'">
+                            源码
+                        </el-button>
+                    </el-button-group>
 
-                            <!-- 普通文本预览（不支持高亮的文件） -->
-                            <pre v-else v-text="fileContent"
-                                class="text-sm leading-relaxed whitespace-pre-wrap break-all  dark:bg-[#2a2c30] text-gray-800 dark:text-gray-200 p-4 m-0 overflow-auto min-h-0 font-mono" />
-                        </div>
+                    <!-- 返回目录树按钮 -->
+                    <el-button :icon="Close" circle size="small" @click="closePreview" />
+                </div>
+            </div>
+
+            <div class="flex-1 flex overflow-auto min-h-0 p-1">
+                <div v-if="previewLoading" class="flex items-center justify-center h-full w-full">
+                    <el-icon class="is-loading" size="20">
+                        <LoadingOutlined />
+                    </el-icon>
+                </div>
+
+                <!-- 图片预览 -->
+                <img v-else-if="previewMode === 'image' && !previewError"
+                    :src="imagePreviewUrl"
+                    @error="onImageError"
+                    class="image-preview w-full h-full object-contain p-2"
+                    alt="图片预览" />
+
+                <!-- 不支持的文件 -->
+                <div v-else-if="previewMode === 'unsupported' && !previewError"
+                    class="w-full h-full flex items-center justify-center">
+                    <div class="text-center">
+                        <p class="text-gray-400 dark:text-gray-500 text-sm">此文件暂不支持预览</p>
+                        <el-button v-if="isElectron" @click="handleOpenInExplorerForCurrent" size="small" class="mt-3">
+                            在资源管理器中打开
+                        </el-button>
                     </div>
                 </div>
-            </template>
-        </LiteSplitpanes>
+
+                <!-- 错误 / 文本内容 -->
+                <div v-else class="w-full min-h-0">
+                    <div v-if="previewError"
+                        class="w-full h-full flex items-center justify-center p-4">
+                        <div class="text-center">
+                            <p class="text-gray-400 dark:text-gray-500 text-sm">{{ previewError }}</p>
+                            <el-button v-if="isElectron && previewMode === 'unsupported'" @click="handleOpenInExplorerForCurrent" size="small" class="mt-3">
+                                在资源管理器中打开
+                            </el-button>
+                        </div>
+                    </div>
+                    <template v-else-if="previewMode === 'text'">
+                        <!-- HTML 预览模式 -->
+                        <iframe v-if="isHtmlFile && currentPreviewMode === 'rendered'" :srcdoc="fileContent"
+                            class="w-full border-0" style="height: 100%;"
+                            sandbox="allow-same-origin allow-scripts" />
+
+                        <!-- Markdown 渲染模式 -->
+                        <div v-else-if="isMarkdownFile && currentPreviewMode === 'rendered'"
+                            class="markdown-preview markdown-text" v-html="renderedContent" />
+
+                        <!-- 源码模式（带语法高亮）- 所有支持的文件类型 -->
+                        <div v-else-if="renderedContent" class="code-preview-container" v-html="renderedContent" />
+
+                        <!-- 普通文本预览（不支持高亮的文件） -->
+                        <pre v-else v-text="fileContent"
+                            class="text-sm leading-relaxed whitespace-pre-wrap break-all dark:bg-[#2a2c30] text-gray-800 dark:text-gray-200 p-4 m-0 overflow-auto min-h-0 font-mono" />
+                    </template>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- 更换工作目录弹窗 -->
     <WorkspaceSettingsDialog v-model:visible="workspaceDialogVisible" :current-workspace-path="currentWorkspacePath"
         :allow-empty="false" @confirm="handleWorkspaceChange" />
 
-    <!-- 右键菜单 -->
-    <div v-if="contextMenu.visible"
-        class="fixed bg-white dark:bg-[#232428] rounded-lg shadow-lg border border-gray-200 dark:border-[#2e3035] py-1 z-50 min-w-40"
-        :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @click.stop @contextmenu.prevent>
-        <div class="px-4 py-2 text-sm text-gray-700 dark:text-[#e8e9ed] hover:bg-gray-100 dark:hover:bg-[#2a2c30] cursor-pointer flex items-center gap-2"
-            @click="handleCopyFileName">
-            <el-icon>
-                <CopyDocument />
-            </el-icon>
-            复制文件名
-        </div>
-        <div class="px-4 py-2 text-sm text-gray-700 dark:text-[#e8e9ed] hover:bg-gray-100 dark:hover:bg-[#2a2c30] cursor-pointer flex items-center gap-2"
-            @click="handleCopyFilePath">
-            <el-icon>
-                <CopyDocument />
-            </el-icon>
-            复制路径
-        </div>
-        <div v-if="isElectron"
-            class="px-4 py-2 text-sm text-gray-700 dark:text-[#e8e9ed] hover:bg-gray-100 dark:hover:bg-[#2a2c30] cursor-pointer flex items-center gap-2"
-            @click="handleOpenInExplorer">
-            <el-icon>
-                <FolderOpened />
-            </el-icon>
-            在资源管理器中打开
-        </div>
-    </div>
+    <ContextMenu
+        :visible="contextMenu.visible"
+        :x="contextMenu.x"
+        :y="contextMenu.y"
+        :items="contextMenuItems"
+        @close="closeContextMenu"
+    />
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted, nextTick } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiService, type FileChangeEvent } from '@/services/ApiService';
-import { Refresh, Close, FolderOpened, Switch, CopyDocument } from '@element-plus/icons-vue';
-import { SwapHorizTwotone as SplitVerticalIcon, SwapVertTwotone as SplitHorizontalIcon } from '@vicons/material';
+import { Refresh, Close, FolderOpened, Switch, CopyDocument, Edit, Delete } from '@element-plus/icons-vue';
 import { LoadingOutlined } from '@vicons/antd';
-import { Folder, Document } from '@element-plus/icons-vue';
-import { LiteSplitpanes } from "../ui";
 import { useStorage, useThrottleFn } from '@vueuse/core';
 import { useMarkdown } from '@/composables/useMarkdown';
 import { useHighlight } from '@/composables/useHighlight';
+import ContextMenu, { type ContextMenuItem } from '@/components/ui/ContextMenu.vue';
 import WorkspaceSettingsDialog from './chat-input/WorkspaceSettingsDialog.vue';
 import SessionBrowserWindowList from './SessionBrowserWindowList.vue';
-
-interface WorkspaceNode {
-    name: string;
-    path: string;
-    isDirectory: boolean;
-    children?: WorkspaceNode[];
-    size?: number;
-    hasChildren?: boolean;
-    loaded?: boolean; // 标记是否已加载子节点
-}
+import WorkspaceTree from './WorkspaceTree.vue';
+import type { WorkspaceNode } from './WorkspaceTree.vue';
 
 interface SelectedFile {
     name: string;
@@ -220,9 +193,15 @@ const previewLoading = ref(false);
 const workspaceDialogVisible = ref(false);
 const currentWorkspacePath = ref<string | null>(null);
 const previewError = ref('');
-const expandedKeys = ref<string[]>([]);
-const treeRef = ref();
-const treeKey = ref(0);
+const selectedNodePath = ref('');
+
+// 预览类型：text / image / unsupported
+const previewMode = ref<'text' | 'image' | 'unsupported' | null>(null);
+// 图片预览 URL（Electron 为 file:// 协议，非 Electron 为 rawfile URL）
+const imagePreviewUrl = ref('');
+
+// 正在加载子节点的目录路径集合
+const loadingPaths = ref<Set<string>>(new Set());
 
 // 右键菜单状态
 const contextMenu = ref({
@@ -232,55 +211,117 @@ const contextMenu = ref({
     node: null as WorkspaceNode | null,
 });
 
+// 右键菜单项
+const contextMenuItems = computed<ContextMenuItem[]>(() => {
+    const items: ContextMenuItem[] = [
+        {
+            label: '复制文件名',
+            icon: CopyDocument,
+            onClick: handleCopyFileName,
+        },
+        {
+            label: '复制路径',
+            icon: CopyDocument,
+            onClick: handleCopyFilePath,
+        },
+    ];
+    if (isElectron) {
+        items.push({
+            label: '在资源管理器中打开',
+            icon: FolderOpened,
+            onClick: handleOpenInExplorer,
+        });
+    }
+    items.push({
+        label: '重命名',
+        icon: Edit,
+        divider: true,
+        onClick: handleRename,
+    });
+    items.push({
+        label: '删除',
+        icon: Delete,
+        onClick: handleDelete,
+    });
+    return items;
+});
+
 // 检测是否为 Electron 环境
 const isElectron = typeof window !== 'undefined' && window.electronAPI !== undefined;
 
-// el-tree 配置
-const treeProps = {
-    label: 'name',
-    children: 'children',
-    isLeaf: (data: WorkspaceNode) => !data.isDirectory,
-};
-
 /**
- * 懒加载节点数据
+ * 异步加载目录的子节点
  */
-async function loadNode(node: any, resolve: (data: WorkspaceNode[]) => void) {
-    // 根节点（level === 0）已经在 loadTree 中加载
-    if (node.level === 0) {
-        resolve(treeData.value);
-        return;
-    }
-
-    // 子节点懒加载
-    const nodeData = node.data as WorkspaceNode;
-
-    if (!nodeData.isDirectory || !props.sessionId) {
-        resolve([]);
-        return;
-    }
-
-    // 关键：如果节点已经加载过，直接返回缓存数据，不重复发起 API 请求
-    if (nodeData.loaded && nodeData.children) {
-        resolve(nodeData.children);
-        return;
-    }
-
+async function loadChildren(node: WorkspaceNode): Promise<WorkspaceNode[]> {
+    if (!props.sessionId) return [];
     try {
-        const response = await apiService.getWorkspaceChildren(props.sessionId, nodeData.path);
-        const children = response.children || [];
-        // 保存到 nodeData，以便后续本地更新
-        nodeData.children = children;
-        nodeData.loaded = true;
-        resolve(children);
+        const response = await apiService.getWorkspaceChildren(props.sessionId, node.path);
+        return response.children || [];
     } catch (error: any) {
-        console.error('[WorkspaceSidebar] Failed to lazy load node:', error);
-        resolve([]);
+        console.error('[WorkspaceSidebar] Failed to load children:', error);
+        return [];
     }
 }
 
-// 布局方向：true=左右，false=上下，默认上下
-const isHorizontalLayout = useStorage('workspaceLayoutHorizontal', false);
+/**
+ * 展开目录时加载子节点
+ */
+async function handleTreeNodeToggle(node: WorkspaceNode, expanded: boolean) {
+    if (!expanded || !node.isDirectory) return;
+
+    // 标记加载中
+    loadingPaths.value = new Set(loadingPaths.value).add(node.path);
+
+    try {
+        const children = await loadChildren(node);
+        node.children = children;
+    } finally {
+        const next = new Set(loadingPaths.value);
+        next.delete(node.path);
+        loadingPaths.value = next;
+    }
+}
+
+// 展开/折叠状态同步到后端（用于文件变化事件监听）
+let collapseSyncTimer: ReturnType<typeof setTimeout> | null = null;
+const expandedPaths = ref<Set<string>>(new Set());
+
+function handleTreeNodeExpandToggle(node: WorkspaceNode, expanded: boolean) {
+    if (expanded) {
+        // 展开：取消待处理的删除，立即同步
+        expandedPaths.value = new Set(expandedPaths.value).add(node.path);
+        if (collapseSyncTimer) clearTimeout(collapseSyncTimer);
+        syncExpandedPaths();
+    } else {
+        // 折叠：消抖 10 秒，避免频繁开关浪费后端监听资源
+        const next = new Set(expandedPaths.value);
+        next.delete(node.path);
+        expandedPaths.value = next;
+        if (collapseSyncTimer) clearTimeout(collapseSyncTimer);
+        collapseSyncTimer = setTimeout(() => syncExpandedPaths(), 10000);
+    }
+}
+
+async function syncExpandedPaths() {
+    if (!props.sessionId) return;
+    try {
+        await apiService.updateWorkspaceExpandedPaths(
+            props.sessionId,
+            Array.from(expandedPaths.value),
+        );
+    } catch (error) {
+        console.error('[WorkspaceSidebar] 同步展开状态失败:', error);
+    }
+}
+
+/**
+ * 点击文件节点选中
+ */
+function handleTreeNodeSelect(node: WorkspaceNode) {
+    if (node.isDirectory) return;
+    selectedNodePath.value = node.path;
+    handleFileSelect(node);
+}
 
 // 预览模式：rendered=预览，source=源码，默认预览
 const currentPreviewMode = useStorage<PreviewMode>('filePreviewMode', 'rendered');
@@ -306,7 +347,7 @@ const { parseMarkdown } = useMarkdown({
 });
 
 // 初始化代码高亮
-const { highlightCode, getLanguageFromExtension, isTextFile } = useHighlight();
+const { highlightCode, getLanguageFromExtension, isTextFile, isImageFile } = useHighlight();
 
 // 当前预览文件的内容哈希，用于检测文件是否变化
 const fileContentHash = ref('');
@@ -444,19 +485,14 @@ async function loadTree(force = false) {
     try {
         const response = await apiService.getWorkspaceTree(props.sessionId);
 
-        // 记录当前的选中状态
-        const currentSelectedKey = treeRef.value?.getCurrentKey();
+        // 保存当前选中路径
+        const currentSelected = selectedNodePath.value;
 
         // 增量更新树数据，保留已加载的子节点和展开状态
         updateTreeData(treeData.value, response.tree || []);
 
-        // 等待 DOM 更新
-        await nextTick();
-
-        // 恢复选中状态
-        if (currentSelectedKey) {
-            treeRef.value?.setCurrentKey(currentSelectedKey);
-        }
+        // 如果当前选中的文件还在树中，保持选中状态（由 selectedNodePath 驱动）
+        selectedNodePath.value = currentSelected;
     } catch (error: any) {
         console.error('Failed to load workspace tree:', error);
     } finally {
@@ -479,71 +515,10 @@ function refreshTree() {
 /**
  * 检查路径是否在已展开的目录下
  * 如果父目录未展开，则该路径下的变化不需要更新展示
+ * 由 updateNodeLocal 中的 !parentNode.children 守卫处理
  */
-function isPathInExpandedDir(filePath: string): boolean {
-    // 根目录总是展开的（因为根目录数据始终加载）
-    if (!filePath || (filePath.indexOf('/') === -1 && filePath.indexOf('\\') === -1)) {
-        return true;
-    }
-
-    // 获取所有已展开节点的路径
-    const expandedPaths = getExpandedNodePaths();
-
-    // 统一使用 / 分隔符处理路径
-    const normalizedPath = filePath.replace(/\\/g, '/');
-    // 检查文件路径的任何一个父目录是否已展开
-    const parts = normalizedPath.split('/');
-    let currentPath = '';
-    for (let i = 0; i < parts.length - 1; i++) {
-        currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
-        if (expandedPaths.includes(currentPath)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/**
- * 获取所有已展开节点的路径
- */
-function getExpandedNodePaths(): string[] {
-    const paths: string[] = [];
-    const tree = treeRef.value;
-
-    // 尝试多种方式获取展开节点
-    if (tree) {
-        // 方式1: 通过 store.nodesMap
-        const nodesMap = tree.store?.nodesMap;
-        if (nodesMap) {
-            Object.values(nodesMap).forEach((node: any) => {
-                if (node.expanded && node.data?.path) {
-                    paths.push(node.data.path);
-                }
-            });
-        }
-
-        // 方式2: 通过 $refs.rootNode
-        if (paths.length === 0 && tree.$refs?.rootNode?.childNodes) {
-            collectExpandedPaths(tree.$refs.rootNode.childNodes, paths);
-        }
-    }
-
-    return paths;
-}
-
-/**
- * 递归收集已展开节点的路径
- */
-function collectExpandedPaths(nodes: any[], paths: string[]): void {
-    nodes.forEach((node: any) => {
-        if (node.expanded && node.data?.path) {
-            paths.push(node.data.path);
-        }
-        if (node.childNodes && node.childNodes.length > 0) {
-            collectExpandedPaths(node.childNodes, paths);
-        }
-    });
+function isPathInExpandedDir(_filePath: string): boolean {
+    return true;
 }
 
 /**
@@ -582,7 +557,7 @@ function updateNodeLocal(event: FileChangeEvent) {
 
     // 如果父节点尚未加载（未展开过），忽略此次更新
     // 根目录（path 为空）始终视为已加载
-    if (!parentNode.loaded && parentNode.path !== '') {
+    if (!parentNode.children && parentNode.path !== '') {
         return;
     }
 
@@ -595,62 +570,39 @@ function updateNodeLocal(event: FileChangeEvent) {
         case 'add':
         case 'addDir':
             // 检查是否已存在
-            const existingIndex = parentNode.children.findIndex(child => child.name === fileName);
-            if (existingIndex === -1) {
-                // 创建新节点
-                const newNode: WorkspaceNode = {
-                    name: fileName,
-                    path: normalizedPath,
-                    isDirectory: event.type === 'addDir',
-                    hasChildren: event.type === 'addDir',
-                    children: event.type === 'addDir' ? [] : undefined,
-                };
-                // 计算插入位置（保持排序：目录在前，按名称排序）
-                let insertBeforeNode = null;
-                for (const child of parentNode.children) {
-                    const childIsDir = child.isDirectory;
-                    const newIsDir = newNode.isDirectory;
-                    if (newIsDir && !childIsDir) {
-                        // 新节点是目录，当前是文件，插入到当前之前
-                        insertBeforeNode = treeRef.value.getNode(child.path);
-                        break;
-                    }
-                    if (newIsDir === childIsDir && newNode.name.localeCompare(child.name) < 0) {
-                        // 同类型且名称更小，插入到当前之前
-                        insertBeforeNode = treeRef.value.getNode(child.path);
-                        break;
-                    }
-                }
-                // 如果 treeRef 未初始化（目录为空时 el-tree 未渲染），直接修改 treeData
-                if (!treeRef.value) {
-                    parentNode.children.push(newNode);
-                    parentNode.children.sort((a, b) => {
-                        if (a.isDirectory !== b.isDirectory) {
-                            return a.isDirectory ? -1 : 1;
-                        }
-                        return a.name.localeCompare(b.name);
-                    });
-                } else if (insertBeforeNode) {
-                    treeRef.value.insertBefore(newNode, insertBeforeNode);
-                } else {
-                    // 根目录的虚拟节点 path 为空字符串，需传入 null 而非节点对象
-                    treeRef.value.append(newNode, parentNode.path || null);
-                }
+            if (parentNode.children.some(child => child.name === fileName)) {
+                break;
             }
+            // 创建新节点
+            const newNode: WorkspaceNode = {
+                name: fileName,
+                path: normalizedPath,
+                isDirectory: event.type === 'addDir',
+                hasChildren: event.type === 'addDir',
+            };
+            // 直接添加到数组，Vue 响应式会自动更新视图
+            parentNode.children.push(newNode);
+            parentNode.children.sort((a, b) => {
+                if (a.isDirectory !== b.isDirectory) {
+                    return a.isDirectory ? -1 : 1;
+                }
+                return a.name.localeCompare(b.name);
+            });
             break;
 
         case 'unlink':
-        case 'unlinkDir':
-            // 使用 el-tree 官方 API 移除节点
-            const node = treeRef.value.getNode(normalizedPath);
-            if (node) {
-                treeRef.value.remove(node);
+        case 'unlinkDir': {
+            // 从 children 数组中移除
+            const rmIdx = parentNode.children.findIndex(child => child.name === fileName);
+            if (rmIdx !== -1) {
+                parentNode.children.splice(rmIdx, 1);
             }
             // 如果删除的是当前预览的文件，自动关闭预览
             if (selectedFile.value && selectedFile.value.path === normalizedPath) {
                 closePreview();
             }
             break;
+        }
 
         case 'change':
             // 文件内容变化，刷新预览内容（如果是当前选中的文件）
@@ -683,16 +635,9 @@ function findNodeByPath(nodes: WorkspaceNode[], path: string): WorkspaceNode | n
 }
 
 /**
- * 处理树节点点击
- */
-function handleTreeNodeClick(data: WorkspaceNode) {
-    handleFileSelect(data);
-}
-
-/**
  * 处理节点右键菜单
  */
-function handleNodeContextMenu(event: MouseEvent, data: WorkspaceNode) {
+function handleContextMenu(event: MouseEvent, data: WorkspaceNode) {
     event.preventDefault();
     contextMenu.value = {
         visible: true,
@@ -700,15 +645,6 @@ function handleNodeContextMenu(event: MouseEvent, data: WorkspaceNode) {
         y: event.clientY,
         node: data,
     };
-
-    // 点击其他地方关闭菜单
-    const closeHandler = () => {
-        closeContextMenu();
-        document.removeEventListener('click', closeHandler);
-    };
-    setTimeout(() => {
-        document.addEventListener('click', closeHandler);
-    }, 0);
 }
 
 /**
@@ -848,22 +784,135 @@ async function handleOpenInExplorer() {
 }
 
 /**
- * 处理文件选择
+ * 重命名文件/目录 - 弹出输入框
  */
-async function handleFileSelect(node: WorkspaceNode) {
-    if (node.isDirectory) return;
-
-    if (!props.sessionId) return;
-
-    // 检查是否为文本文件，非文本文件不打开预览
-    const ext = node.name.substring(node.name.lastIndexOf('.')).toLowerCase();
-    if (!isTextFile(ext)) {
-        previewError.value = '不支持预览二进制文件';
-        selectedFile.value = null;
-        fileContent.value = '';
+async function handleRename() {
+    const node = contextMenu.value.node;
+    if (!node || !props.sessionId) {
+        closeContextMenu();
         return;
     }
 
+    try {
+        const { value: newName } = await ElMessageBox.prompt(
+            '请输入新名称',
+            '重命名',
+            {
+                inputValue: node.name,
+                inputPlaceholder: '请输入新文件名',
+                confirmButtonText: '确定',
+                cancelButtonText: '取消',
+                inputValidator: (val: string) => {
+                    if (!val || !val.trim()) return '名称不能为空';
+                    if (val.includes('/') || val.includes('\\')) return '名称不能包含路径分隔符';
+                    return true;
+                },
+            },
+        );
+
+        if (!newName || !newName.trim()) {
+            closeContextMenu();
+            return;
+        }
+
+        const result = await apiService.renameWorkspaceFile(
+            props.sessionId,
+            node.path,
+            newName.trim(),
+        );
+
+        if (result.success) {
+            ElMessage.success('重命名成功');
+            // 本地更新节点名称，避免重新加载整棵树
+            node.name = newName.trim();
+            if (result.newPath) {
+                node.path = result.newPath;
+            }
+            // 如果当前预览的文件正好是重命名的文件，更新预览路径
+            if (selectedFile.value && selectedFile.value.path === node.path) {
+                selectedFile.value.name = newName.trim();
+                selectedFile.value.path = result.newPath || node.path;
+                const ext = newName.trim().substring(newName.trim().lastIndexOf('.')).toLowerCase();
+                selectedFile.value.extension = ext;
+            }
+        }
+    } catch (error: any) {
+        // ElMessageBox.prompt 取消会抛异常，忽略
+        if (error === 'cancel' || error === 'close') {
+            closeContextMenu();
+            return;
+        }
+        console.error('[WorkspaceSidebar] Rename failed:', error);
+        ElMessage.error(error?.response?.data?.message || error.message || '重命名失败');
+    }
+    closeContextMenu();
+}
+
+/**
+ * 删除文件/目录 - 二次确认后执行
+ */
+async function handleDelete() {
+    const node = contextMenu.value.node;
+    if (!node || !props.sessionId) {
+        closeContextMenu();
+        return;
+    }
+
+    const displayName = node.name;
+    const typeLabel = node.isDirectory ? '目录' : '文件';
+
+    try {
+        await ElMessageBox.confirm(
+            `确定要删除${typeLabel}「${displayName}」吗？${node.isDirectory ? '该目录下的所有内容将被永久删除。' : ''}`,
+            '删除确认',
+            {
+                confirmButtonText: '确定删除',
+                cancelButtonText: '取消',
+                type: 'warning',
+                distinguishCancelAndClose: true,
+            },
+        );
+
+        const result = await apiService.deleteWorkspaceFile(
+            props.sessionId,
+            node.path,
+        );
+
+        if (result.success) {
+            ElMessage.success('删除成功');
+            // 如果删除的是当前预览的文件，关闭预览
+            if (selectedFile.value && selectedFile.value.path === node.path) {
+                closePreview();
+            }
+        }
+    } catch (error: any) {
+        // ElMessageBox.confirm 取消会抛异常，忽略
+        if (error === 'cancel' || error === 'close') {
+            closeContextMenu();
+            return;
+        }
+        console.error('[WorkspaceSidebar] Delete failed:', error);
+        ElMessage.error(error?.response?.data?.message || error.message || '删除失败');
+    }
+    closeContextMenu();
+}
+
+/**
+ * 处理文件选择
+ *
+ * 所有文件都打开预览面板，按类型决定显示内容：
+ * - 文本文件 → 通过 API 加载内容（后端限制 5MB）
+ * - 图片文件（Electron）→ 拼接本地 file:// 路径，无大小限制
+ * - 图片文件（非 Electron）→ 使用 rawfile URL（后端限制 20MB）
+ * - 不支持格式 → 显示"此文件暂不支持预览" + Electron 打开按钮
+ */
+async function handleFileSelect(node: WorkspaceNode) {
+    if (node.isDirectory) return;
+    if (!props.sessionId) return;
+
+    const ext = node.name.substring(node.name.lastIndexOf('.')).toLowerCase();
+
+    // 总是打开预览面板
     selectedFile.value = {
         name: node.name,
         path: node.path,
@@ -872,11 +921,60 @@ async function handleFileSelect(node: WorkspaceNode) {
         content: '',
         mimeType: ''
     };
+    previewError.value = '';
+    previewLoading.value = false;
 
-    // 切换文件时重置哈希值，确保新文件内容能正常加载
-    fileContentHash.value = '';
+    if (isTextFile(ext)) {
+        // 文本文件：通过后端 API 读取（已有 5MB 限制）
+        previewMode.value = 'text';
+        fileContentHash.value = '';
+        await loadFileContent(node.path);
+    } else if (isImageFile(ext)) {
+        previewMode.value = 'image';
+        // Electron 正式环境（file:// 协议）：直连本地文件，无大小限制
+        // 开发环境（http://localhost）或非 Electron：走 rawfile 接口，后端限制 20MB
+        if (isElectron && window.location.protocol === 'file:') {
+            await loadImageLocal(node);
+        } else {
+            // 非 Electron / Electron 开发环境：rawfile URL 携带 ?token=，直接 <img> 渲染
+            if (node.size && node.size > 20 * 1024 * 1024) {
+                previewError.value = '文件过大暂不支持预览';
+            } else {
+                imagePreviewUrl.value = apiService.getWorkspaceRawFileUrl(props.sessionId, node.path);
+            }
+        }
+    } else {
+        // 不支持的文件格式
+        previewMode.value = 'unsupported';
+    }
+}
 
-    await loadFileContent(node.path);
+/**
+ * Electron 环境下加载本地图片
+ * 获取工作目录绝对路径，拼接相对路径构造 file:// URL
+ */
+async function loadImageLocal(node: WorkspaceNode) {
+    try {
+        const resp = await apiService.getWorkspacePath(props.sessionId!);
+        const absWorkspacePath = resp.workspacePath;
+        if (!absWorkspacePath) {
+            previewError.value = '无法获取工作目录路径';
+            return;
+        }
+        // 拼接绝对路径：工作目录 + 文件相对路径
+        const relativePath = node.path.replace(/\\/g, '/');
+        const separator = absWorkspacePath.endsWith('/') || absWorkspacePath.endsWith('\\') ? '' : '/';
+        const fullPath = (absWorkspacePath + separator + relativePath).replace(/\\/g, '/');
+        // encodeURI 编码空格、中文等特殊字符，但保留 : / 等 URL 合法字符
+        const encodedPath = encodeURI(fullPath);
+        // 构造 file:// 协议 URL，Windows 需要 / 前缀
+        const fileUrl = encodedPath.startsWith('/') ? `file://${encodedPath}` : `file:///${encodedPath}`;
+        imagePreviewUrl.value = fileUrl;
+        console.log('[WorkspaceSidebar] Image local URL:', fileUrl);
+    } catch (error: any) {
+        previewError.value = '加载图片失败';
+        console.error('[WorkspaceSidebar] Failed to load image locally:', error);
+    }
 }
 
 /**
@@ -913,7 +1011,13 @@ async function loadFileContent(filePath: string, force = false, skipLoading = fa
         selectedFile.value!.mimeType = response.mimeType;
         fileContent.value = response.content;
     } catch (error: any) {
-        previewError.value = error.message || '加载文件失败';
+        // 翻译后端错误信息为友好中文提示
+        const msg = error?.response?.data?.message || error.message || '';
+        if (msg.includes('File too large') || msg.includes('too large')) {
+            previewError.value = '文件过大暂不支持预览';
+        } else {
+            previewError.value = '加载文件失败';
+        }
         console.error('Failed to load file:', error);
     } finally {
         previewLoading.value = false;
@@ -927,13 +1031,48 @@ function closePreview() {
     selectedFile.value = null;
     fileContent.value = '';
     previewError.value = '';
+    previewMode.value = null;
+    imagePreviewUrl.value = '';
 }
 
 /**
- * 切换布局方向
+ * 图片加载失败处理
+ * - Electron: file:// 加载失败，通常是文件不存在/无法访问
+ * - 非 Electron: rawfile 返回错误，通常是文件过大（超 20MB）
  */
-function toggleLayout() {
-    isHorizontalLayout.value = !isHorizontalLayout.value;
+function onImageError(event: Event | string) {
+    const src = (typeof event === 'object' && (event as Event).target instanceof HTMLImageElement)
+        ? (event as Event).target!.getAttribute('src')
+        : imagePreviewUrl.value;
+    console.error('[WorkspaceSidebar] Image load failed, URL:', src);
+    previewError.value = isElectron ? '图片加载失败' : '文件过大暂不支持预览';
+}
+
+/**
+ * 在资源管理器中打开当前选中的文件（预览面板内的按钮使用）
+ */
+async function handleOpenInExplorerForCurrent() {
+    if (!selectedFile.value || !props.sessionId || !isElectron) return;
+    try {
+        const resp = await apiService.getWorkspacePath(props.sessionId);
+        const wsPath = resp.workspacePath;
+        if (!wsPath) {
+            ElMessage.error('无法获取工作目录路径');
+            return;
+        }
+        const relativePath = selectedFile.value.path.replace(/\\/g, '/');
+        const separator = wsPath.endsWith('/') || wsPath.endsWith('\\') || relativePath.startsWith('/') ? '' : '/';
+        let fullPath = wsPath + separator + relativePath;
+        // 如果是文件，打开其父目录
+        const lastSep = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));
+        if (lastSep > 0) {
+            fullPath = fullPath.substring(0, lastSep);
+        }
+        await window.electronAPI!.openFolder(fullPath);
+    } catch (error: any) {
+        console.error('[WorkspaceSidebar] Open in explorer failed:', error);
+        ElMessage.error('打开失败');
+    }
 }
 
 /**
@@ -985,57 +1124,11 @@ async function handleWorkspaceChange(workspacePath: string | null) {
 
         // 清空旧树数据并重新加载，确保显示新的工作目录
         treeData.value = [];
-        expandedKeys.value = [];
         await loadTree();
     } catch (error: any) {
         console.error('Failed to change workspace path:', error);
         ElMessage.error(error.message || '更换工作目录失败');
     }
-}
-
-/**
- * 收集当前所有已展开节点的路径
- */
-function collectExpandedPathsFromTree(): string[] {
-    const paths: string[] = [];
-    const tree = treeRef.value;
-    if (!tree) return paths;
-
-    const nodesMap = tree.store?.nodesMap;
-    if (nodesMap) {
-        Object.values(nodesMap).forEach((node: any) => {
-            if (node.expanded && node.data?.path) {
-                paths.push(node.data.path);
-            }
-        });
-    }
-    return paths;
-}
-
-// 防抖发送展开状态到后端
-let expandPathsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-function sendExpandedPathsToBackend() {
-    if (expandPathsDebounceTimer) {
-        clearTimeout(expandPathsDebounceTimer);
-    }
-    expandPathsDebounceTimer = setTimeout(async () => {
-        if (!props.sessionId) return;
-        const paths = collectExpandedPathsFromTree();
-        try {
-            await apiService.updateWorkspaceExpandedPaths(props.sessionId, paths);
-        } catch (error) {
-            console.error('[WorkspaceSidebar] 同步展开状态失败:', error);
-        }
-    }, 300);
-}
-
-// 节点展开/折叠事件处理
-function onNodeExpand() {
-    sendExpandedPathsToBackend();
-}
-
-function onNodeCollapse() {
-    sendExpandedPathsToBackend();
 }
 
 let unsubscribeWatcher: (() => void) | null = null;
@@ -1120,51 +1213,7 @@ onUnmounted(() => {
     background-color: unset !important;
 }
 
-/* 工作目录树样式 */
-.workspace-tree {
-    background: transparent;
-    --el-tree-node-content-height: 32px;
-}
-
-.workspace-tree .el-tree-node__content {
-    border-radius: 4px;
-    padding: 0 8px;
-}
-
-.workspace-tree .el-tree-node__content:hover {
-    background-color: var(--el-color-primary-light-9, rgba(0, 0, 0, 0.04));
-}
-
-.dark .workspace-tree .el-tree-node__content:hover {
-    background-color: rgba(255, 255, 255, 0.05);
-}
-
-.workspace-tree .el-tree-node.is-current>.el-tree-node__content {
-    background-color: var(--el-color-primary-light-9, rgba(0, 0, 0, 0.06)) !important;
-}
-
-.dark .workspace-tree .el-tree-node.is-current>.el-tree-node__content {
-    background-color: rgba(255, 255, 255, 0.08) !important;
-}
-
-.workspace-tree .el-tree-node__expand-icon {
-    color: var(--color-text-gray, #666);
-}
-
-.dark .workspace-tree .el-tree-node__expand-icon {
-    color: var(--color-text-gray);
-}
-
-.workspace-tree-node {
-    font-size: 13px;
-    color: var(--color-text, #333);
-    display: block;
-    width: 100%;
-}
-
-.dark .workspace-tree-node {
-    color: var(--color-text);
-}
+/* 工作目录树样式 — 已迁移到 WorkspaceTreeNode.vue */
 
 /* 工作目录工具按钮 - 纯图标无框样式 */
 .workspace-tool-btn {
@@ -1193,72 +1242,4 @@ onUnmounted(() => {
     color: var(--color-primary, #409eff);
 }
 
-/* LiteSplitpanes 基础样式 - 适配暗色模式 */
-:deep(.lite-splitpanes__pane) {
-    background-color: transparent;
-    border: none !important;
-}
-
-/* 工作目录 pane 设置最小宽度和滚动 */
-:deep(.lite-splitpanes__pane:first-child) {
-    overflow: hidden !important;
-}
-
-/* 目录窗格滚动条美化 */
-:deep(.lite-splitpanes__pane:first-child) ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-}
-
-:deep(.lite-splitpanes__pane:first-child) ::-webkit-scrollbar-thumb {
-    background-color: rgba(0, 0, 0, 0.08);
-    border-radius: 6px;
-}
-
-:deep(.lite-splitpanes__pane:first-child) ::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(0, 0, 0, 0.15);
-}
-
-:deep(.dark .lite-splitpanes__pane:first-child) ::-webkit-scrollbar-thumb {
-    background-color: rgba(255, 255, 255, 0.08);
-}
-
-:deep(.dark .lite-splitpanes__pane:first-child) ::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(255, 255, 255, 0.15);
-}
-
-/* LiteSplitpanes 自定义样式 - 使用 :deep 确保穿透 scoped */
-:deep(.lite-splitpanes__splitter) {
-    background-color: var(--color-surface, #f5f5f5) !important;
-    transition: background-color 0.2s ease;
-    position: relative;
-    z-index: 1;
-}
-
-:deep(.lite-splitpanes__splitter:hover) {
-    background-color: var(--el-color-primary-light-8, #d9ecff) !important;
-}
-
-:deep(.dark .lite-splitpanes__splitter) {
-    background-color: #25262a !important;
-}
-
-:deep(.dark .lite-splitpanes__splitter:hover) {
-    background-color: var(--el-color-primary-light-8, #4a4d55) !important;
-}
-
-/* 水平布局：分割条为横线 */
-:deep(.lite-splitpanes--horizontal .lite-splitpanes__splitter),
-:deep(.lite-splitpanes__splitter--horizontal) {
-    height: 4px !important;
-    min-height: 4px !important;
-    max-height: 4px !important;
-    cursor: row-resize !important;
-}
-
-/* 垂直布局：分割条为竖线 */
-:deep(.lite-splitpanes:not(.lite-splitpanes--horizontal) .lite-splitpanes__splitter) {
-    width: 4px !important;
-    cursor: col-resize !important;
-}
 </style>

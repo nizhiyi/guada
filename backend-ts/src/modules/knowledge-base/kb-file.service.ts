@@ -19,6 +19,7 @@ import { VectorDatabase } from "../../common/vector-db/interfaces/vector-databas
 import { createPaginatedResponse } from "../../common/types/pagination";
 import { UploadPathService } from "../../common/services/upload-path.service";
 import { FileNamingService } from "../../common/services/file-naming.service";
+import type { FileProgressCallback } from "../../common/types/file-progress.types";
 
 @Injectable()
 export class KbFileService implements OnModuleInit {
@@ -504,6 +505,24 @@ export class KbFileService implements OnModuleInit {
    * 处理文件（主流程）
    */
   async processFile(fileId: string): Promise<void> {
+    // 创建带频率限制的进度回调
+    let lastPct = -1;
+    const updateProgress: FileProgressCallback = async (pct, step) => {
+      // 相同百分比不重复写库（但允许从高到低的合理变化）
+      if (pct === lastPct) return;
+      lastPct = pct;
+      try {
+        await this.fileRepo.updateProcessingStatus(
+          fileId,
+          "processing",
+          pct,
+          step,
+        );
+      } catch {
+        // 忽略进度更新失败（不中断主流程）
+      }
+    };
+
     try {
       // 1. 查询文件记录
       const fileRecord = await this.fileRepo.findById(fileId);
@@ -530,24 +549,26 @@ export class KbFileService implements OnModuleInit {
       await this.fileRepo.updateProcessingStatus(
         fileId,
         "processing",
-        10,
-        "正在解析文件...",
+        1,
+        "正在准备处理...",
       );
 
-      // 4. 解析文件内容（带页码信息）
+      // 4. 解析文件内容（带进度回调，覆盖 0%~80% 范围）
       if (!filePath) {
         throw new Error("文件路径不存在，无法解析");
       }
-      const parseResult = await this.parserService.parseFile(filePath);
 
-      await this.fileRepo.updateProcessingStatus(
-        fileId,
-        "processing",
-        30,
-        "文件解析完成，正在分块...",
-      );
+      // 解析阶段的回调：映射解析器内部 0%~100% 到全局 2%~80%
+      const parseOnProgress: FileProgressCallback | undefined = async (pct, step) => {
+        const globalPct = 2 + Math.round((pct / 100) * 78);
+        await updateProgress(globalPct, step);
+      };
 
-      // 5. 文本分块（使用智能分块服务，按页边界分块）
+      const parseResult = await this.parserService.parseFile(filePath, parseOnProgress);
+
+      await updateProgress(82, "文件解析完成，正在分块...");
+
+      // 5. 文本分块（合并所有页面为连续文档后统一分块，不再按页边界切割）
       const chunksData = await this.chunkingService.chunkPages(
         parseResult.pages,
         {
@@ -561,12 +582,7 @@ export class KbFileService implements OnModuleInit {
 
       this.logger.log(`文本分块完成：共${totalChunks}个分块`);
 
-      await this.fileRepo.updateProcessingStatus(
-        fileId,
-        "processing",
-        50,
-        `分块完成（${totalChunks}个），正在向量化...`,
-      );
+      await updateProgress(86, `分块完成（${totalChunks}个），正在向量化...`);
 
       // 6. 清理旧数据（重新处理场景）
       try {
@@ -587,8 +603,7 @@ export class KbFileService implements OnModuleInit {
         );
       }
 
-      // 7. 批量向量化（暂时跳过，方便调试 OCR 等前置流程）
-      // TODO: 调试完成后将 SKIP_VECTORIZATION 改为 false 恢复向量化
+      // 7. 批量向量化
       const SKIP_VECTORIZATION = false;
       let allEmbeddings: number[][] = [];
 
@@ -603,26 +618,21 @@ export class KbFileService implements OnModuleInit {
         }
 
         this.logger.log(`开始批量向量化 ${chunks.length} 个分块...`);
-        await this.fileRepo.updateProcessingStatus(
-          fileId,
-          "processing",
-          50,
-          `正在批量向量化 (${chunks.length} 个分块)...`,
-        );
+        await updateProgress(88, `正在批量向量化 (${chunks.length} 个分块)...`);
 
+        // 向量化进度映射：每条完成 → 全局百分比 88%~93%
         allEmbeddings = await this.embeddingService.getEmbeddings(
           chunks,
           modelWithProvider.provider.apiUrl || "",
           modelWithProvider.provider.apiKey || "",
           modelWithProvider.modelName,
+          async (current, total) => {
+            const pct = 88 + Math.round((current / total) * 5);
+            await updateProgress(pct, `向量化进度：${current}/${total}`);
+          },
         );
 
-        await this.fileRepo.updateProcessingStatus(
-          fileId,
-          "processing",
-          90,
-          "向量化完成，正在存储...",
-        );
+        await updateProgress(93, "向量化完成，正在存储...");
 
         // 存储到向量数据库
         const tableId = `kb_${knowledgeBaseId}`;
@@ -643,12 +653,7 @@ export class KbFileService implements OnModuleInit {
         this.logger.warn(`[调试模式] 跳过向量化`);
       }
 
-      await this.fileRepo.updateProcessingStatus(
-        fileId,
-        "processing",
-        95,
-        "正在保存分块到数据库...",
-      );
+      await updateProgress(95, "正在保存分块到数据库...");
 
       // 保存分块到数据库
       for (let idx = 0; idx < chunksData.length; idx++) {
@@ -656,7 +661,7 @@ export class KbFileService implements OnModuleInit {
         await this.chunkRepo.create({
           fileId: fileId,
           knowledgeBaseId: knowledgeBaseId,
-          content: chunkData.cleanContent,
+          content: chunkData.content,
           chunkIndex: idx,
           vectorId: `chunk_${idx}_${fileId}`,
           embeddingDimensions: allEmbeddings[idx]?.length || 0,
@@ -1049,6 +1054,67 @@ export class KbFileService implements OnModuleInit {
 
     this.logger.log(`重新开始处理文件：${file.displayName}, KB=${kbId}`);
     return { message: "文件已开始重新处理", success: true };
+  }
+
+  /**
+   * 清空知识库所有分块和向量数据，重置文件状态为待处理
+   * 在向量模型变更时调用
+   */
+  async clearAndReprocessKnowledgeBase(kbId: string): Promise<void> {
+    this.logger.log(`开始清空知识库分块和向量数据: ${kbId}`);
+
+    // 1. 删除向量集合
+    const tableId = `kb_${kbId}`;
+    try {
+      await this.vectorDb.deleteCollection(tableId);
+      this.logger.log(`已删除向量集合: ${tableId}`);
+    } catch (error: any) {
+      this.logger.warn(`删除向量集合失败（可能不存在）: ${error.message}`);
+    }
+
+    // 2. 获取所有非目录文件
+    const allFiles = await this.prisma.kBFile.findMany({
+      where: {
+        knowledgeBaseId: kbId,
+        isDirectory: false,
+      },
+      select: { id: true },
+    });
+
+    if (allFiles.length === 0) {
+      this.logger.log(`知识库 ${kbId} 没有需要重新处理的文件`);
+      return;
+    }
+
+    // 3. 逐文件删除分块记录
+    let totalChunks = 0;
+    for (const file of allFiles) {
+      const deleted = await this.chunkRepo.deleteByFileId(file.id);
+      totalChunks += deleted;
+    }
+    this.logger.log(`已删除 ${totalChunks} 条分块记录`);
+
+    // 4. 重置所有文件状态为 pending
+    const fileIds = allFiles.map(f => f.id);
+    for (const fileId of fileIds) {
+      await this.fileRepo.updateProcessingStatus(
+        fileId,
+        "pending",
+        0,
+        "等待重新处理...",
+        null,
+        0,
+        0,
+      );
+    }
+    this.logger.log(`已重置 ${fileIds.length} 个文件状态为 pending`);
+
+    // 5. 逐个启动后台处理
+    for (const fileId of fileIds) {
+      this.processFileInBackground(fileId);
+    }
+
+    this.logger.log(`知识库 ${kbId} 已开始全部重新处理`);
   }
 
   /**

@@ -10,7 +10,6 @@ import { KnowledgeBaseRepository } from '../../../common/database/knowledge-base
 import { UploadPathService } from '../../../common/services/upload-path.service';
 import { WorkspaceService } from '../../../common/services/workspace.service';
 import { appendResetMarker } from '../utils/external-id';
-import { TempFileManager } from './temp-file-manager.service';
 
 /**
  * 会话映射服务
@@ -29,7 +28,6 @@ export class SessionMapperService {
     private kbRepo: KnowledgeBaseRepository,
     private uploadPathService: UploadPathService,
     private workspaceService: WorkspaceService,
-    private tempFileManager: TempFileManager,
   ) { }
 
   /**
@@ -70,7 +68,7 @@ export class SessionMapperService {
       // 创建新会话,使用机器人创建者的 userId
       // 注意：不设置 characterId 和 modelId，都由下游动态解析
       // Bot 会话工作目录使用 BOT 前缀，与 Web 会话的 WORK 前缀区分
-      const workspacePath = this.workspaceService.generateWorkspaceDir('BOT');
+      const workspacePath = await this.workspaceService.generateWorkspaceDir('BOT');
       session = await this.prisma.session.create({
         data: {
           userId: botInstance.userId,  // 使用机器人创建者的用户ID
@@ -150,7 +148,7 @@ export class SessionMapperService {
 
     // 3. 最后使用全局默认对话模型
     if (!modelId) {
-      modelId = this.settingsStorage.getSettingValue(
+      modelId = await this.settingsStorage.getSettingValue(
         SG_MODELS,
         SK_MOD_CHAT,
         null

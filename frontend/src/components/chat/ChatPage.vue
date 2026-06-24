@@ -12,22 +12,14 @@
             <div ref="paneContentRef" class="chat-pane-content"
               style="height: 100%; display: flex; flex-direction: column;">
               <!-- 页面标题栏 -->
-              <PageHeader :title="currentSession?.title || ''">
+              <PageHeader :title="mainSession?.title || ''">
                 <template #actions>
                   <!-- 工作目录切换 -->
-                  <div v-if="currentSession?.id"
+                  <div v-if="mainSession?.id"
                     class="cursor-pointer p-1 rounded-lg text-gray-600 dark:text-[#8b8d95] transition-all duration-200 hover:bg-gray-100 dark:hover:bg-[#2a2c30] hover:text-gray-900 dark:hover:text-[#e8e9ed] flex items-center justify-center"
                     @click="layoutStore.toggleWorkspace()" :title="layoutStore.workspaceVisible ? '关闭工作目录' : '打开工作目录'">
                     <el-icon class="w-5 h-5">
                       <FolderOpened />
-                    </el-icon>
-                  </div>
-                  <!-- 记忆管理按钮 -->
-                  <div
-                    class="cursor-pointer p-1 rounded-lg text-gray-600 dark:text-[#8b8d95] transition-all duration-200 hover:bg-gray-100 dark:hover:bg-[#2a2c30] hover:text-gray-900 dark:hover:text-[#e8e9ed] flex items-center justify-center"
-                    @click="memoPanelVisible = !memoPanelVisible" title="记忆管理">
-                    <el-icon class="w-5 h-5">
-                      <Reading />
                     </el-icon>
                   </div>
                   <!-- 更多操作下拉菜单 -->
@@ -45,34 +37,27 @@
                             <span>清空记录</span>
                           </span>
                         </el-dropdown-item>
-                        <!-- <el-dropdown-item command="export">
-                            <span class="flex items-center gap-2">
-                              <FileDownloadOutlined class="w-4 h-4" />
-                              <span>导出记录</span>
-                            </span>
-                          </el-dropdown-item>
-                          <el-dropdown-item command="import">
-                            <span class="flex items-center gap-2">
-                              <FileUploadOutlined class="w-4 h-4" />
-                              <span>导入记录</span>
-                            </span>
-                          </el-dropdown-item> -->
                       </el-dropdown-menu>
                     </template>
                   </el-dropdown>
                 </template>
               </PageHeader>
 
-              <ChatPanel ref="chatPanelRef" v-model:session="currentSession" @save-settings="handleSaveSessionSettings"
-                @toggle-workspace-pane="layoutStore.toggleWorkspace" />
+              <!-- 会话面板：主会话和子 Agent 共用同一个 ChatPanel，通过 session 切换 -->
+              <ChatPanel ref="chatPanelRef" :session="panelSession" :readonly="activeTabId !== 'main'"
+                :hide-header="activeTabId !== 'main'" :agent-tabs="agentTabs" :active-tab-id="activeTabId"
+                @save-settings="handleSaveSessionSettings" @toggle-workspace-pane="layoutStore.toggleWorkspace"
+                @switch-agent="switchTab" @close-agent="closeSubAgentTab" />
+
               <!-- 右侧大纲导航 -->
-              <ChatOutline v-if="currentSession && sessions.length > 0" :messages="chatPanelRef?.activeMessages || []"
-                :chat-panel-ref="chatPanelRef" @scroll-to-message="handleScrollToMessage" />
+              <ChatOutline v-if="mainSession && activeTabId === 'main'"
+                :messages="chatPanelRef?.activeMessages || []" :chat-panel-ref="chatPanelRef"
+                @scroll-to-message="handleScrollToMessage" />
             </div>
           </template>
 
           <template #pane2>
-            <WorkspaceSidebar v-if="layoutStore.workspaceVisible && currentSession" :session-id="currentSession.id" />
+            <WorkspaceSidebar v-if="layoutStore.workspaceVisible && mainSession" :session-id="mainSession.id" />
           </template>
         </LiteSplitpanes>
       </div>
@@ -84,11 +69,7 @@
     </template>
   </div>
 
-  <!-- 记忆管理弹窗 -->
-  <el-dialog v-model="memoPanelVisible" title="记忆管理" width="390px" :close-on-click-modal="false" destroy-on-close
-    class="memo-panel-dialog">
-    <MemoPanel v-if="currentSession" :session-id="currentSession.id" />
-  </el-dialog>
+
 
 
 </template>
@@ -106,10 +87,20 @@ import type { Session } from '@/types/session';
 import { LiteSplitpanes } from "../ui";
 import ChatPanel from "./ChatPanel.vue";
 import CreateSessionChatPanel from "./CreateSessionChatPanel.vue";
+/**
+ * 子代理 Tab 数据接口
+ */
+interface AgentTab {
+  id: string;
+  name: string;
+  status: 'running' | 'completed' | 'error';
+  loaded?: boolean;
+  avatarUrl?: string;  // 角色/团队子Agent的头像
+}
 
 // 引入组件
 import PageHeader from "@/components/PageHeader.vue";
-import { ElDialog, ElMessageBox, ElDropdown, ElDropdownMenu, ElDropdownItem } from "element-plus";
+import { ElDialog, ElDropdown, ElDropdownMenu, ElDropdownItem } from "element-plus";
 import { Reading, FolderOpened } from '@element-plus/icons-vue';
 import {
   MoreVertOutlined,
@@ -117,13 +108,183 @@ import {
   // FileDownloadOutlined,
   // FileUploadOutlined
 } from "@vicons/material";
-import { useBreakpoints, breakpointsTailwind } from '@vueuse/core'
 
-const breakpoints = useBreakpoints(breakpointsTailwind)
 
-const MemoPanel = defineAsyncComponent(() => import("./MemoPanel.vue"));
 const ChatOutline = defineAsyncComponent(() => import("./ChatOutline.vue"));
 const WorkspaceSidebar = defineAsyncComponent(() => import("./WorkspaceSidebar.vue"));
+
+// 子 Agent Tab 状态
+const agentTabs = ref<AgentTab[]>([
+  { id: 'main', name: '主代理', status: 'completed', loaded: true }
+]);
+const activeTabId = ref('main');
+
+// 子会话列表（从主会话同步，支持动态增删）
+const subSessions = ref<Session[]>([]);
+
+/**
+ * 面板当前展示的会话对象
+ * - main Tab：使用 mainSession（主会话）
+ * - 子 Agent Tab：从 subSessions 中查找对应的子会话
+ */
+const panelSession = computed(() => {
+  if (activeTabId.value === 'main') {
+    return mainSession.value;
+  }
+  // 从子会话列表中查找
+  return subSessions.value.find((s) => s.id === activeTabId.value) || null;
+});
+
+/**
+ * 处理子 Agent 创建事件（来自 SSE 全局广播）
+ *
+ * 仅负责新增 Tab，不管理状态。状态由 stream_started/stream_finished 统一处理。
+ */
+function handleSubAgentCreate(event: any) {
+  const payload = event.payload || {};
+  const subSessionId = payload.subSessionId;
+  const name = payload.name || '子任务';
+  const session = payload.session;
+  if (!subSessionId) return;
+
+  const exists = agentTabs.value.find(t => t.id === subSessionId);
+  if (!exists) {
+    agentTabs.value.push({
+      id: subSessionId,
+      name,
+      status: 'completed',
+      loaded: false,
+      avatarUrl: session?.avatarUrl || session?.character?.avatarUrl || undefined,
+    });
+  }
+
+  // 同步加入 subSessions，确保 stream_started 能识别该子 Agent
+  const subExists = subSessions.value.find(s => s.id === subSessionId);
+  if (!subExists && session) {
+    subSessions.value.push(session);
+  }
+}
+
+/**
+ * 处理子 Agent 关闭事件（来自 SSE 全局广播）
+ */
+function handleSubAgentClosed(event: any) {
+  const payload = event.payload || {};
+  const subSessionId = payload.subSessionId;
+  if (!subSessionId) return;
+
+  // 从 agentTabs 中移除对应的子 Agent
+  const index = agentTabs.value.findIndex(t => t.id === subSessionId);
+  if (index > -1) {
+    agentTabs.value.splice(index, 1);
+  }
+
+  // 如果当前激活的是被关闭的子 Agent，切回主线程
+  if (activeTabId.value === subSessionId) {
+    activeTabId.value = 'main';
+  }
+
+  // 从 subSessions 中移除
+  const subIndex = subSessions.value.findIndex(s => s.id === subSessionId);
+  if (subIndex > -1) {
+    subSessions.value.splice(subIndex, 1);
+  }
+}
+
+/**
+ * 处理流开始事件（统一的状态来源）
+ *
+ * 包括主会话和子 Agent 会话的流开始，根据 sessionId 匹配更新状态。
+ */
+function handleStreamStarted(event: any) {
+  const { sessionId } = event;
+  if (!sessionId) return;
+
+  // 更新对应 Tab 状态为 running（子 Agent 按 sessionId 匹配）
+  const tab = agentTabs.value.find(t => t.id === sessionId);
+  if (tab) {
+    tab.status = 'running';
+  }
+  // 主代理流开始：同步更新 main Tab 状态
+  if (sessionId === mainSession.value?.id) {
+    const mainTab = agentTabs.value.find(t => t.id === 'main');
+    if (mainTab) mainTab.status = 'running';
+  }
+  // 忽略自身发起的流
+  if (event.source === apiService.getClientId()) {
+    return;
+  }
+
+  // 如果是主会话的流，通知 ChatPanel 订阅流
+  if (sessionId === mainSession.value?.id) {
+    const chatPanel = chatPanelRef.value as any;
+    if (chatPanel && chatPanel.subscribeToActiveStream) {
+      const replaceMessageId = event.payload?.replaceMessageId;
+      if (replaceMessageId) {
+        const messages = sessionStore.getMessages(sessionId);
+        const index = messages.findIndex((m: any) => m.id === replaceMessageId);
+        if (index !== -1) {
+          messages.splice(index, 1);
+        }
+      }
+      chatPanel.subscribeToActiveStream();
+    }
+    return;
+  }
+
+
+}
+
+/**
+ * 处理流结束事件（统一的状态来源）
+ *
+ * 根据 reason 判断子 Agent 的最终状态。
+ */
+function handleStreamFinished(event: any) {
+  const { sessionId, payload } = event;
+  if (!sessionId) return;
+
+  // 更新对应 Tab 状态（子 Agent 按 sessionId 匹配）
+  const tab = agentTabs.value.find(t => t.id === sessionId);
+  if (tab) {
+    const reason = payload?.reason;
+    tab.status = reason === 'completed' ? 'completed' : 'error';
+  }
+  // 主代理流结束：同步更新 main Tab 状态
+  if (sessionId === mainSession.value?.id) {
+    const mainTab = agentTabs.value.find(t => t.id === 'main');
+    if (mainTab) {
+      const reason = payload?.reason;
+      mainTab.status = reason === 'completed' ? 'completed' : 'error';
+    }
+  }
+}
+
+/**
+ * 切换 Tab
+ */
+async function switchTab(tabId: string) {
+  activeTabId.value = tabId;
+}
+
+/**
+ * 关闭子 Agent Tab
+ */
+function closeSubAgentTab(tabId: string) {
+  const index = agentTabs.value.findIndex(t => t.id === tabId);
+  if (index > -1 && tabId !== 'main') {
+    agentTabs.value.splice(index, 1);
+    if (activeTabId.value === tabId) {
+      activeTabId.value = 'main';
+    }
+  }
+
+  // 同步从 subSessions 中移除
+  const subIndex = subSessions.value.findIndex(s => s.id === tabId);
+  if (subIndex > -1) {
+    subSessions.value.splice(subIndex, 1);
+  }
+}
 
 // 组合式函数
 const { toast, confirm } = usePopup();
@@ -133,8 +294,8 @@ const title = useTitle();
 
 // 删除会话确认对话框状态
 
-// 当前会话对象，包含会话的基本信息和设置
-const currentSession: Ref<Session | null> = ref(null);
+// 主会话对象（侧边栏选中的根会话），包含会话的基本信息和设置
+const mainSession: Ref<Session | null> = ref(null);
 
 
 // 判断是否为 Electron 环境
@@ -146,8 +307,6 @@ const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null);
 const paneContentRef = ref<HTMLElement | null>(null);
 let paneSnapWidth = 0;
 // 控制设置模态框的显示与隐藏
-// 控制记忆管理窗格的显示状态，调试阶段默认打开
-const memoPanelVisible = useStorage('memoPanelVisible', false);
 // 布局状态
 const layoutStore = useLayoutStore();
 
@@ -157,12 +316,9 @@ const sessionStore = useSessionStore();
 
 // SSE 事件监听取消函数
 let unsubscribeStreamStarted: (() => void) | null = null;
-
-// 计算属性
-// 从 sessionStore 的 sessionsMap 派生会话列表
-const sessions = computed((): Session[] => {
-  return sessionStore.sessionsList;
-});
+let unsubscribeStreamFinished: (() => void) | null = null;
+let unsubscribeSubAgentCreate: (() => void) | null = null;
+let unsubscribeSubAgentClosed: (() => void) | null = null;
 
 
 // 业务逻辑函数
@@ -173,7 +329,23 @@ const sessions = computed((): Session[] => {
 const fetchSession = async (sessionId: string) => {
   try {
     const session = await apiService.fetchSession(sessionId);
-    currentSession.value = session;
+    mainSession.value = session;
+
+    // 恢复子会话 Tab 状态（页面刷新后从 subSessions 重建，isStreaming 由后端注入）
+    subSessions.value = session.subSessions || [];
+    if (subSessions.value.length > 0) {
+      // 保留 main Tab，重建子 Agent Tabs（状态以 isStreaming 为准）
+      const mainTab = agentTabs.value.find(t => t.id === 'main');
+      agentTabs.value = [
+        mainTab || { id: 'main', name: '主代理', status: 'completed', loaded: true },
+        ...subSessions.value.map((sub) => ({
+          id: sub.id,
+          name: sub.title || '子任务',
+          status: (sub.isStreaming ? 'running' : 'completed') as 'running' | 'completed' | 'error',
+          loaded: true,
+        })),
+      ];
+    }
   } catch (error) {
     console.error('获取会话详情失败:', error);
     toast.error("获取会话详情失败");
@@ -189,7 +361,7 @@ const goChatRoute = async (sessionId: string | null) => {
     router.replace({ name: 'Chat', params: { sessionId: sessionId } });
   } else {
     router.replace({ name: 'Chat', params: { sessionId: 'new-session' } });
-    currentSession.value = null;
+    mainSession.value = null;
   }
 };
 
@@ -207,7 +379,7 @@ function onPaneResize() {
   }
 }
 
-function onPaneResized(event: { panes: Array<{ size: number }> }) {
+function onPaneResized(event: { panes: Array<{ size: string | number }> }) {
   paneSnapWidth = 0;
   const el = paneContentRef.value;
   if (el) {
@@ -216,7 +388,7 @@ function onPaneResized(event: { panes: Array<{ size: number }> }) {
 
   // 保存工作目录分割位置
   if (layoutStore.workspaceVisible && isElectron && event.panes.length >= 1) {
-    layoutStore.setWorkspaceSplitSize(event.panes[0].size);
+    layoutStore.setWorkspaceSplitSize(Number(event.panes[0].size));
   }
 }
 
@@ -241,7 +413,17 @@ const updateSessionById = async (sessionId: string, data: any) => {
 
 
 const updateSelectedSession = async (sessionId: string) => {
-  if (sessionId !== currentSession.value?.id) {
+  if (sessionId == null || sessionId === 'new-session') {
+    mainSession.value = null;
+    sessionStore.activeSessionId = "new-session";
+    return;
+  }
+  sessionStore.activeSessionId = sessionId;
+  if (sessionId !== mainSession.value?.id) {
+    // 切换会话时重置子代理状态到主线程
+    activeTabId.value = 'main';
+    agentTabs.value = [{ id: 'main', name: '主代理', status: 'completed', loaded: true }];
+    subSessions.value = [];
     await fetchSession(sessionId);
   }
 };
@@ -271,11 +453,12 @@ const handleCreateSessionWithMessage = async (session: any, inputMessage: any) =
  */
 const handleSaveSessionSettings = async () => {
   try {
-    if (currentSession.value) {
-      await apiService.updateSession(currentSession.value.id, {
-        modelId: currentSession.value.modelId,
-        settings: currentSession.value.settings,
-        workspacePath: currentSession.value.workspacePath
+    const targetSession = panelSession.value;
+    if (targetSession) {
+      await apiService.updateSession(targetSession.id, {
+        modelId: targetSession.modelId,
+        settings: targetSession.settings,
+        workspacePath: targetSession.workspacePath
       });
     }
   } catch (error: any) {
@@ -304,20 +487,19 @@ async function handleMoreSelect(key: string) {
  * 清空聊天记录
  */
 async function clearChat() {
-  if (!currentSession.value) {
+  if (!mainSession.value) {
     toast.error("当前没有活动的会话");
     return;
   }
 
   if (await confirm("清空聊天记录", "确定要删除所有聊天记录吗？此操作不可撤销。")) {
     try {
-      await apiService.clearSessionMessages(currentSession.value.id);
-      sessionStore.clearSessionState(currentSession.value.id);
-      // 注意：clearSessionState 已从 sessionsMap 中移除该会话
+      await apiService.clearSessionMessages(mainSession.value.id);
+      sessionStore.clearSessionMessages(mainSession.value.id);
       // 重新加载消息列表
       const chatPanel = chatPanelRef.value as any;
       if (chatPanel && chatPanel.loadMessages) {
-        chatPanel.loadMessages(currentSession.value.id);
+        chatPanel.loadMessages(mainSession.value.id);
       }
       toast.success("聊天记录已清空");
     } catch (error) {
@@ -343,7 +525,7 @@ function handleScrollToMessage(messageId: string) {
 
 // 监听当前会话的变化，更新页面标题
 watch(
-  () => currentSession,
+  () => mainSession,
   (session) => {
     if (session.value) {
       title.value = `${session.value.title}-对话`;
@@ -358,54 +540,28 @@ watch(
   () => route.params.sessionId,
   async (newSessionId) => {
     if (!newSessionId) {
-      currentSession.value = null;
+      mainSession.value = null;
       goChatRoute(null);
       return;
     }
     const sessionId = Array.isArray(newSessionId) ? newSessionId[0] : newSessionId;
-    sessionStore.activeSessionId = sessionId;
-    if (sessionStore.activeSessionId !== 'new-session')
-      await updateSelectedSession(sessionId);
+    await updateSelectedSession(sessionId);
   }
 );
 
 // 生命周期
 onMounted(async () => {
   const sessionId = Array.isArray(route.params.sessionId) ? route.params.sessionId[0] : route.params.sessionId;
-  if (sessionId && sessionId !== "new-session") {
-    sessionStore.activeSessionId = sessionId;
-    await updateSelectedSession(sessionId);
-  } else {
-    currentSession.value = null;
-    sessionStore.activeSessionId = "new-session";
-  }
 
-  // 注册 SSE stream_started 事件监听
-  unsubscribeStreamStarted = apiService.onSessionEvent('stream_started', (event) => {
-    const { sessionId, payload } = event;
+  await updateSelectedSession(sessionId);
 
-    // 忽略自身发起的流
-    if (event.source === apiService.getClientId()) {
-      return;
-    }
+  // 注册流事件监听（统一的状态来源）
+  unsubscribeStreamStarted = apiService.onSessionEvent('stream_started', handleStreamStarted);
+  unsubscribeStreamFinished = apiService.onSessionEvent('stream_finished', handleStreamFinished);
 
-    // 如果是当前会话，通知 ChatPanel 订阅流
-    if (sessionId === currentSession.value?.id) {
-      const chatPanel = chatPanelRef.value as any;
-      if (chatPanel && chatPanel.subscribeToActiveStream) {
-        // 如果存在 replaceMessageId，先删除本地对应消息避免重复
-        const replaceMessageId = payload?.replaceMessageId;
-        if (replaceMessageId) {
-          const messages = sessionStore.getMessages(sessionId);
-          const index = messages.findIndex((m: any) => m.id === replaceMessageId);
-          if (index !== -1) {
-            messages.splice(index, 1);
-          }
-        }
-        chatPanel.subscribeToActiveStream();
-      }
-    }
-  });
+  // 注册子 Agent 生命周期事件监听（仅负责增删 Tab）
+  unsubscribeSubAgentCreate = apiService.onSessionEvent('sub_agent_create', handleSubAgentCreate);
+  unsubscribeSubAgentClosed = apiService.onSessionEvent('sub_agent_closed', handleSubAgentClosed);
 });
 
 // 组件卸载时取消监听
@@ -413,6 +569,18 @@ onUnmounted(() => {
   if (unsubscribeStreamStarted) {
     unsubscribeStreamStarted();
     unsubscribeStreamStarted = null;
+  }
+  if (unsubscribeStreamFinished) {
+    unsubscribeStreamFinished();
+    unsubscribeStreamFinished = null;
+  }
+  if (unsubscribeSubAgentCreate) {
+    unsubscribeSubAgentCreate();
+    unsubscribeSubAgentCreate = null;
+  }
+  if (unsubscribeSubAgentClosed) {
+    unsubscribeSubAgentClosed();
+    unsubscribeSubAgentClosed = null;
   }
 });
 

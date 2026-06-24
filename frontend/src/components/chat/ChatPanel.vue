@@ -1,7 +1,7 @@
 <template>
   <!-- 消息内容区域 -->
   <div class="flex-1 overflow-hidden w-full items-center relative">
-    <template v-if="!isLoading && currentSessionId && activeMessages.length === 0">
+    <template v-if="!isLoading && currentSessionId && activeMessages.length === 0 && currentSession?.character">
       <!-- 欢迎页 -->
       <WelcomeScreen :session="currentSession" />
     </template>
@@ -18,8 +18,8 @@
     <template v-if="!isLoading">
       <ScrollContainer ref="scrollContainerRef"
         class="max-h-full chat-scroll-container transition-opacity duration-300 px-5"
-        :class="{ 'opacity-0': showSkeleton, 'opacity-100': !showSkeleton }"
-        :auto-scroll="needScrollToBottom && isStreaming" @scroll="handleScroll">
+        :class="{ 'opacity-0': showSkeleton, 'opacity-100': !showSkeleton }" :auto-scroll="needScrollToBottom"
+        @scroll="handleScroll">
         <div class="max-w-205 mx-auto pt-5 pb-8">
           <!-- 加载更多历史消息指示器 -->
           <div v-if="isLoadingMore" class="w-full py-4 flex items-center justify-center text-gray-400">
@@ -36,10 +36,8 @@
           </div>
 
           <MessageItem v-for="(message, index) in activeMessages" :key="message.id" :message="message"
-            v-memo="[message.id, message.contents, message.currentTurnsId, message.state?.isStreaming, message.state?.isThinking, isStreaming]"
             :avatar="message.role == 'user' ? userAvater : currentSession?.avatarUrl"
-            :character-name="currentSession?.character?.title"
-            :character-avatar="currentSession?.character?.avatarUrl"
+            :character-name="currentSession?.character?.title" :character-avatar="currentSession?.character?.avatarUrl"
             :is-last="index === activeMessages.length - 1"
             :allow-generate="!isStreaming && index === lastUserMessageIndex" @delete="deleteMessage" @edit="editMessage"
             @copy="copyMessage" @generate="generateResponse" @regenerate="regenerateResponse"
@@ -53,6 +51,15 @@
               <LoadingOutlined />
             </el-icon>
             <span class="text-sm">正在优化对话历史，请稍候...</span>
+          </div>
+
+          <!-- 流式输出状态指示 -->
+          <div v-if="isStreaming && !sessionStore.sessionIsCompressing(currentSession?.id || '')"
+            class="flex items-center text-gray-500 pb-8">
+            <el-icon class="is-loading mr-2" size="14">
+              <Loading />
+            </el-icon>
+            <span class="text-xs">回答中</span>
           </div>
         </div>
       </ScrollContainer>
@@ -68,6 +75,45 @@
     <div class="max-w-205 flex flex-col items-start mx-auto">
 
 
+      <!-- 线程列表抽屉 -->
+      <template v-if="agentTabs">
+        <div v-if="agentTabs.length > 1"
+          class="-mb-1.5 pb-4 w-full flex flex-col rounded-tl-xl rounded-tr-xl bg-gray-200 dark:bg-[#2a2a2a] overflow-hidden transition-all duration-300"
+          :class="{ 'max-h-48': isAgentDrawerExpanded, 'max-h-13': !isAgentDrawerExpanded }">
+          <!-- 头部折叠栏 -->
+          <div class="flex items-center px-4 py-2 cursor-pointer select-none" @click="toggleAgentDrawer">
+            <el-icon class="mr-2 text-gray-500 dark:text-[#8b8d95] transition-transform duration-300"
+              :class="{ 'rotate-180': isAgentDrawerExpanded }">
+              <ArrowUp />
+            </el-icon>
+            <span class="text-sm text-gray-700 dark:text-[#c5c7cc]">
+              线程列表 ({{ runningAgentCount }} 运行中)
+            </span>
+            <span class="ml-auto text-xs text-gray-400 dark:text-[#6b6d75]">
+              {{ agentTabs.length - 1 }} 个子线程
+            </span>
+          </div>
+          <!-- 展开的线程列表 -->
+          <div class="px-1.5 pb-2" style="scrollbar-gutter: stable both-edges"
+            :class="{ 'overflow-y-auto': isAgentDrawerExpanded, 'overflow-y-hidden': !isAgentDrawerExpanded }">
+            <div v-for="tab in agentTabs" :key="tab.id"
+              class="flex items-center gap-2 py-1.5 px-2 rounded-lg cursor-pointer transition-colors" :class="{
+                'bg-white dark:bg-[#2a2c30] text-gray-900 dark:text-[#e8e9ed]': tab.id === activeTabId,
+                'text-gray-500 dark:text-[#8b8d95] hover:bg-gray-100 dark:hover:bg-[#25262a]': tab.id !== activeTabId,
+              }" @click="emit('switch-agent', tab.id)">
+              <!-- 运行状态指示器 -->
+              <el-icon v-if="tab.status === 'running'" class="is-loading text-blue-500" size="12">
+                <Loading />
+              </el-icon>
+              <span v-else-if="tab.status === 'completed'" class="w-2 h-2 rounded-full bg-green-500" />
+              <span v-else class="w-3 h-3 rounded-full bg-red-500" />
+              <span class="text-sm flex-1 truncate">{{ tab.name }}</span>
+
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- 编辑模式提示条 -->
       <div v-if="editMode"
         class="-mb-1.5 w-full flex items-center px-4 pt-2 pb-6 rounded-tl-xl rounded-tr-xl bg-gray-200 dark:bg-[#2a2a2a]">
@@ -79,10 +125,28 @@
 
       <div class="w-full flex items-center" style="margin-top: -16px;z-index: 9;">
         <ChatInput v-model:value="inputMessage.content" v-model:files="inputMessage.files"
-          :session-id="currentSession?.id" :config="chatInputConfig" :streaming="isStreaming" mode="chat"
+          :session-id="effectiveSessionId" :config="chatInputConfig" :streaming="isStreaming" mode="chat"
           @config-change="handleConfigChange" @send="handleSendMessage" @abort="abortResponse"
-          @toggle-workspace-pane="emit('toggle-workspace-pane')" />
+          @toggle-workspace-pane="emit('toggle-workspace-pane')">
+          <template #toolbar-actions>
+            <!-- 上下文使用率指示器：10 格竖条 -->
+            <el-button class="workspace-btn" @click="memoPanelVisible = true" text>
+              <el-icon size="16">
+                <Database24Regular />
+              </el-icon>
+              <div class="bar-indicator flex items-end gap-0.5">
+                <div v-for="i in 10" :key="i" class="bar"
+                  :class="{ active: sharedTokenStats && i <= activeBars, [barColor]: true }" />
+              </div>
+            </el-button>
+          </template>
+        </ChatInput>
       </div>
+      <!-- 记忆管理弹窗 -->
+      <el-dialog v-model="memoPanelVisible" title="记忆管理" width="390px" :close-on-click-modal="false" destroy-on-close
+        class="memo-panel-dialog">
+        <MemoPanel v-if="currentSessionId" :session-id="currentSessionId" />
+      </el-dialog>
       <!-- <div class="ai-disclaimer text-xs text-gray-400 text-center mt-2">内容由 AI 生成，仅供参考</div> -->
     </div>
   </div>
@@ -90,7 +154,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, nextTick, defineAsyncComponent } from "vue";
 import { apiService } from "../../services/ApiService";
 import { usePopup } from "@/composables/usePopup";
 import { useDebounceFn } from "@vueuse/core";
@@ -103,13 +167,17 @@ import type { InputMessageState, Session } from '@/types/session';
 // 导入新创建的 composables
 import { useSessionChat } from '@/composables/useSessionChat'
 import { useMessageOperations } from '@/composables/useMessageOperations'
+import { useSessionTokenStats } from '@/composables/useSessionTokenStats'
 
 // 组件导入
 import MessageItem from "./MessageItem.vue";
 import MessageSkeleton from "./MessageSkeleton.vue";
 import { ChatInput, ScrollContainer, ScrollToBottomButton } from "../ui";
 import WelcomeScreen from './WelcomeScreen.vue';
+const MemoPanel = defineAsyncComponent(() => import("./MemoPanel.vue"));
 import { LoadingOutlined } from '@vicons/antd'
+import { ArrowUp, Loading } from '@element-plus/icons-vue'
+import { Database24Regular } from '@vicons/fluent'
 
 
 // 常量定义
@@ -120,12 +188,35 @@ const { confirm, editText, toast, notify } = usePopup();
 const authStore = useAuthStore()
 const sessionStore = useSessionStore();
 
+
+// 记忆管理弹窗显隐
+const memoPanelVisible = ref(false);
+
+// 上下午使用率指示器：10 格竖条
+const activeBars = computed(() => {
+  if (!sharedTokenStats.value) return 0;
+  return Math.ceil(sharedTokenStats.value.percentage / 10);
+});
+
+const barColor = computed(() => {
+  if (!sharedTokenStats.value) return 'bar-gray';
+  const pct = sharedTokenStats.value.percentage;
+  if (pct >= 80) return 'bar-orange';
+  if (pct >= 60) return 'bar-yellow';
+  return 'bar-green';
+});
+
 // 初始化流式响应处理器
 const streamHandler = useStreamResponse(sessionStore, apiService)
 
 // Props & Emits - 类型化
 const props = defineProps<{
   session: Session | null;
+  sessionId?: string;      // 外部传入的会话 ID（优先级高于 session.id）
+  readonly?: boolean;      // 只读模式（子 Agent）
+  hideHeader?: boolean;    // 隐藏头部（子 Agent）
+  agentTabs?: { id: string; name: string; status: 'running' | 'completed' | 'error'; loaded?: boolean }[]; // 子代理 Tab 列表
+  activeTabId?: string;    // 当前激活的 Tab ID
 }>();
 
 const emit = defineEmits<{
@@ -133,6 +224,8 @@ const emit = defineEmits<{
   openSettings: []
   'save-settings': []
   'toggle-workspace-pane': []
+  'switch-agent': [tabId: string]  // 切换子代理
+  'close-agent': [tabId: string]    // 关闭子代理
 }>();
 
 // 计算属性 - 类型化
@@ -143,6 +236,18 @@ const currentSession = computed({
 
 const userAvater = computed(() => authStore.user?.avatarUrl);
 const currentSessionId = ref<string | null>(null);
+
+// 共享的 Token 统计（useSessionTokenStats 自动监听流状态刷新）
+const currentSessionIdRef = computed(() => currentSessionId.value);
+const { tokenStats: sharedTokenStats, fetchTokenStats } = useSessionTokenStats(currentSessionIdRef);
+
+/**
+ * 有效的会话 ID
+ * 优先使用 props.sessionId，其次使用 props.session.id
+ */
+const effectiveSessionId = computed(() => {
+  return props.sessionId || props.session?.id || '';
+});
 const isLoading = ref(true);
 // 使用 useSessionChat composable
 const {
@@ -152,9 +257,8 @@ const {
 } = useSessionChat(sessionStore, apiService)
 
 // 响应式数据
-const messagesContainerRef = ref<HTMLElement | null>(null);
 const scrollContainerRef = ref<any>(null);
-const needScrollToBottom = ref(true);
+const needScrollToBottom = ref(false);
 let scrollTicking = false;
 let lastScrollTop = 0;
 
@@ -170,7 +274,6 @@ const showSkeleton = ref(false)
 let skeletonTimer: ReturnType<typeof setTimeout> | null = null
 let skeletonMinDisplayTimer: ReturnType<typeof setTimeout> | null = null
 let skeletonShowTime: number = 0 // 记录骨架屏开始显示的时间戳
-const SKELETON_DELAY = 200 // 延迟显示骨架屏的毫秒数
 const SKELETON_MIN_DISPLAY = 500 // 骨架屏最少显示毫秒数
 
 
@@ -183,6 +286,23 @@ const {
   prepareNewMessage,
   enterEditMode
 } = useMessageOperations(sessionStore, apiService, currentSessionId)
+
+// 子代理抽屉展开状态
+const isAgentDrawerExpanded = ref(false)
+
+/**
+ * 切换子代理抽屉展开/折叠
+ */
+function toggleAgentDrawer() {
+  isAgentDrawerExpanded.value = !isAgentDrawerExpanded.value
+}
+
+/**
+ * 运行中的子代理数量
+ */
+const runningAgentCount = computed(() => {
+  return (props.agentTabs || []).filter(t => t.status === 'running').length
+})
 
 // isStreaming 需要在滚动逻辑之前定义
 const isStreaming = computed(() => {
@@ -218,9 +338,7 @@ const updateScrollButtonVisibility = useDebounceFn(() => {
  * 平滑滚动到底部
  */
 function scrollToBottom() {
-
   if (scrollContainerRef.value) {
-    needScrollToBottom.value = true;
     scrollContainerRef.value.smoothScrollToBottom()
   }
 }
@@ -229,9 +347,9 @@ function scrollToBottom() {
  * 立即滚动到底部
  */
 function immediateScrollToBottom() {
-  needScrollToBottom.value = true;
   scrollContainerRef.value?.immediateScrollToBottom()
 }
+
 
 /**
  * 处理滚动事件
@@ -239,11 +357,13 @@ function immediateScrollToBottom() {
 function handleScroll(event: any) {
   if (scrollTicking) return;
   scrollTicking = true;
+
   requestAnimationFrame(() => {
-    const isAtBottom = scrollContainerRef.value?.isAtBottom;
     // 从 ScrollContainer 的滚动元素获取 scrollTop，确保准确性
     const scrollElement = scrollContainerRef.value?.getScrollElement?.();
     const scrollTop = scrollElement?.scrollTop ?? event.target?.scrollTop ?? 0;
+    const isAtBottom =
+      scrollElement?.scrollHeight - scrollTop - scrollElement?.clientHeight <= 5;
 
     // 检测是否滚动到顶部附近，触发加载更多历史消息
     if (
@@ -260,9 +380,10 @@ function handleScroll(event: any) {
       }
     }
 
+    // 注意，容器变小导致的滚动不应该视为向上滚动
     if (needScrollToBottom.value && lastScrollTop - scrollTop > 10 && !isAtBottom) {
       needScrollToBottom.value = false;
-    } else if (!needScrollToBottom.value && isAtBottom) {
+    } else if (!needScrollToBottom.value && isAtBottom && isStreaming.value) {
       needScrollToBottom.value = true;
     }
     lastScrollTop = scrollTop;
@@ -345,7 +466,11 @@ const chatInputConfig = computed(() => ({
   knowledgeBaseIds: inputMessage.value?.knowledgeBaseIds || currentSession.value?.settings?.referencedKbs || [],
 
   // 工作目录路径 - 对应 handleConfigChange 中的 config.workspacePath
-  workspacePath: currentSession.value?.workspacePath || null
+  workspacePath: currentSession.value?.workspacePath || null,
+
+  // 模型参数 - 对应 handleConfigChange 中的 config.model 等
+  modelOverrideEnabled: currentSession.value?.settings?.modelOverrideEnabled ?? false,
+  model: currentSession.value?.settings?.model ?? null,
 }));
 
 /**
@@ -397,6 +522,22 @@ const handleConfigChange = (config: any) => {
     console.log('保存 workspacePath 到会话:', config.workspacePath);
   }
 
+  // 处理模型参数
+  if (typeof config.modelOverrideEnabled !== 'undefined') {
+    currentSession.value.settings.modelOverrideEnabled = config.modelOverrideEnabled;
+  }
+  if (typeof config.model !== 'undefined') {
+    if (config.model) {
+      currentSession.value.settings.model = {
+        temperature: config.model.temperature ?? null,
+        topP: config.model.topP ?? null,
+        frequencyPenalty: config.model.frequencyPenalty ?? null,
+      };
+    } else {
+      currentSession.value.settings.model = null;
+    }
+  }
+
   debouncedSaveSession();
 };
 
@@ -406,8 +547,10 @@ const debouncedSaveSession = useDebounceFn(() => {
 }, 100);
 
 // 监听器
-watch(() => props.session?.id, async (newSessionId: string | undefined, oldSessionId: string | undefined) => {
-  await handleSessionChange(newSessionId ?? null, oldSessionId ?? null);
+watch(() => props.session?.id || props.sessionId, async (newSessionId: string | undefined, oldSessionId: string | undefined) => {
+  const newId = newSessionId ?? props.sessionId ?? null;
+  const effectiveOldId = oldSessionId ?? null;
+  await handleSessionChange(newId, effectiveOldId);
 }, { immediate: true });
 
 // 监听流式状态变化，在第一次对话完成后生成标题
@@ -417,12 +560,17 @@ watch(() => isStreaming.value, async (newVal, oldVal) => {
     if (activeMessages.value.length == 2 && !hasGeneratedTitle.value) {
       await generateTitleIfNeeded(currentSessionId.value!, activeMessages.value, currentSession);
     }
+    nextTick(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          needScrollToBottom.value = false;
+        });
+      });
+    });
+  } else {
+    needScrollToBottom.value = true;
+    immediateScrollToBottom();
   }
-}, { immediate: true });
-
-// 监听消息变化，智能显示回到底部按钮
-watch(() => activeMessages.value.length, () => {
-  updateScrollButtonVisibility()
 }, { immediate: true });
 
 
@@ -810,10 +958,6 @@ async function handleSendMessage(payload?: InputMessageState) {
       exitEditMode();
     }
 
-    // 统一处理发送后的滚动
-    await nextTick();
-    immediateScrollToBottom();
-
     // 发起流式请求（后端会自动创建消息并启动流）
     if (currentSessionId.value) {
       handleStreamResponseWithCreate(
@@ -1014,5 +1158,45 @@ function scrollToMessage(messageId: string) {
 
 .edit-mode-banner:hover {
   box-shadow: 0 3px 12px rgba(230, 162, 60, 0.15);
+}
+
+/* 工具栏按钮：与 ChatInputToolbar 保持样式一致 */
+.workspace-btn {
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  height: 22px;
+  padding: 0 3px;
+  display: flex;
+  align-items: center;
+  transition: all 0.2s;
+}
+
+/* 竖条指示器 */
+.bar-indicator {
+  height: 10px;
+  margin: 2px 0 2px 4px;
+  display: flex;
+  align-items: flex-end;
+}
+
+.bar-indicator .bar {
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background-color: #e0e0e0;
+  transition: background-color 0.3s;
+}
+
+.bar-indicator .bar.active.bar-green {
+  background-color: #67c23a;
+}
+
+.bar-indicator .bar.active.bar-yellow {
+  background-color: #e6a23c;
+}
+
+.bar-indicator .bar.active.bar-orange {
+  background-color: #f56c6c;
 }
 </style>

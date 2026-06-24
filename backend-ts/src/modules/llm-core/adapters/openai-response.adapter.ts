@@ -3,12 +3,12 @@ import { OpenAI } from "openai";
 import { IProtocolAdapter } from "./base.adapter";
 import {
   MessageRecord,
-  InternalToolDefinition,
   LLMCompletionParams,
   LLMResponseChunk,
   ToolCallItem,
 } from "../types/llm.types";
-import { ProviderConfig, ConnectionTestResult } from "../types/provider.types";
+import { ToolDefinition } from "../../tools/interfaces/tool-provider.interface";
+import { ProviderConfig, ConnectionTestResult, RemoteModel } from "../types/provider.types";
 
 /**
  * OpenAI Responses API 适配器
@@ -44,6 +44,25 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
           : `连接失败: ${error.message}`,
         details: error,
       };
+    }
+  }
+
+  /**
+   * 从 OpenAI 兼容 API 同步模型列表
+   * 部分第三方服务可能不支持 /v1/models，此时返回空列表
+   */
+  async syncRemoteModels(config: ProviderConfig): Promise<RemoteModel[]> {
+    try {
+      const client = this.createClient(config);
+      const response = await client.models.list();
+      return response.data.map((model) => ({
+        id: model.id,
+        created: model.created,
+        owned_by: model.owned_by,
+      }));
+    } catch (error: any) {
+      this.logger.warn(`Failed to sync remote models (API may not support /v1/models): ${error.message}`);
+      return [];
     }
   }
 
@@ -203,7 +222,7 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
   /**
    * 将内部扁平化工具定义转换为 OpenAI Responses API 格式
    */
-  private convertTools(tools: InternalToolDefinition[]): any[] {
+  private convertTools(tools: ToolDefinition[]): any[] {
     return tools.map((tool) => ({
       type: "function",
       name: tool.name,
@@ -228,6 +247,7 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
 
     for await (const event of response) {
       const responseChunk: LLMResponseChunk = {
+        type: "text",
         content: null,
         reasoningContent: null,
         finishReason: null,
@@ -243,6 +263,7 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
           continue;
 
         case "response.reasoning_text.delta":
+          responseChunk.type = "think";
           responseChunk.reasoningContent = event.delta;
           break;
 
@@ -250,6 +271,7 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
           continue;
 
         case "response.reasoning_summary_text.delta":
+          responseChunk.type = "think";
           responseChunk.reasoningContent = event.delta;
           break;
 
@@ -274,6 +296,7 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
             const info = toolCallInfoMap.get(event.item_id);
             if (!info) continue;
             if (!responseChunk.toolCalls) {
+              responseChunk.type = "tool_call";
               responseChunk.toolCalls = [];
             }
             responseChunk.toolCalls.push({
@@ -290,12 +313,14 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
           continue;
 
         case "response.completed":
+          responseChunk.type = "finish";
           responseChunk.finishReason = "stop";
           if (event.response?.usage) {
             responseChunk.usage = {
               promptTokens: event.response.usage.input_tokens,
               completionTokens: event.response.usage.output_tokens,
               totalTokens: event.response.usage.total_tokens,
+              cachedTokens: extractOpenAICachedTokens(event.response.usage),
             };
           }
           break;
@@ -331,6 +356,7 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
     }
 
     const result: LLMResponseChunk = {
+      type: "finish",
       content: null,
       reasoningContent: null,
       finishReason: "stop",
@@ -367,6 +393,7 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
         promptTokens: response.usage.input_tokens,
         completionTokens: response.usage.output_tokens,
         totalTokens: response.usage.total_tokens,
+        cachedTokens: extractOpenAICachedTokens(response.usage),
       };
     }
 
@@ -416,4 +443,30 @@ export class OpenAIResponseAdapter implements IProtocolAdapter {
       }
     }
   }
+}
+
+/**
+ * 从 OpenAI 协议 usage 对象中提取缓存 token 字段
+ * 兼容 OpenAI 官方 (prompt_tokens_details.cached_tokens) 和 DeepSeek (prompt_cache_hit_tokens) 风格
+ */
+function extractOpenAICachedTokens(rawUsage: any): { read?: number; missed?: number } | undefined {
+  const cachedTokens: { read?: number; missed?: number } = {};
+
+  // DeepSeek 风格: usage.prompt_cache_hit_tokens (flat in usage)
+  if (rawUsage.prompt_cache_hit_tokens != null) {
+    cachedTokens.read = Number(rawUsage.prompt_cache_hit_tokens);
+    if (rawUsage.prompt_cache_miss_tokens != null) {
+      cachedTokens.missed = Number(rawUsage.prompt_cache_miss_tokens);
+    }
+  } else {
+    // OpenAI 官方格式: usage.prompt_tokens_details.cached_tokens
+    const details = rawUsage.prompt_tokens_details;
+    if (details?.cached_tokens != null) {
+      cachedTokens.read = Number(details.cached_tokens);
+    }
+  }
+
+  return cachedTokens.read !== undefined || cachedTokens.missed !== undefined
+    ? cachedTokens
+    : undefined;
 }

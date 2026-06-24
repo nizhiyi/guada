@@ -10,13 +10,15 @@ import {
   UseGuards,
   Res,
   Headers,
+  HttpException,
+  HttpStatus,
 } from "@nestjs/common";
 import type { Response } from "express";
 import { AuthGuard } from "../auth/auth.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import { SessionService } from "./session.service";
 import { WorkspaceService } from "../../common/services/workspace.service";
-import { SessionEventsService } from "./session-events.service";
+import { EventBusService } from "../../common/events/event-bus.service";
 import { UpdateSessionDto } from "./dto/update-session.dto";
 import * as path from 'path';
 import * as fs from 'fs';
@@ -28,7 +30,7 @@ export class SessionsController {
   constructor(
     private readonly sessionService: SessionService,
     private readonly workspaceService: WorkspaceService,
-    private readonly sessionEventsService: SessionEventsService,
+    private readonly eventBus: EventBusService,
   ) { }
 
   @Get("sessions")
@@ -57,8 +59,7 @@ export class SessionsController {
     const session = await this.sessionService.createSession(user.id, data);
 
     // 广播会话创建事件，携带 source 使前端能过滤自身事件
-    this.sessionEventsService.broadcastToUser(user.id, {
-      type: "session_created",
+    this.eventBus.emit("session.created", {
       userId: user.id,
       sessionId: session.id,
       timestamp: new Date().toISOString(),
@@ -84,8 +85,7 @@ export class SessionsController {
     const session = await this.sessionService.updateSession(id, user.id, data);
 
     // 广播会话更新事件，携带 source 使前端能过滤自身事件
-    this.sessionEventsService.broadcastToUser(user.id, {
-      type: "session_updated",
+    this.eventBus.emit("session.updated", {
       userId: user.id,
       sessionId: id,
       timestamp: new Date().toISOString(),
@@ -117,8 +117,7 @@ export class SessionsController {
     await this.sessionService.deleteSession(id, user.id, shouldDeleteWorkspace);
 
     // 广播会话删除事件，携带 source 使前端能过滤自身事件
-    this.sessionEventsService.broadcastToUser(user.id, {
-      type: "session_deleted",
+    this.eventBus.emit("session.deleted", {
       userId: user.id,
       sessionId: id,
       timestamp: new Date().toISOString(),
@@ -178,7 +177,7 @@ export class SessionsController {
     }
 
     // 解析会话工作目录路径（已自动确保目录存在）
-    const workspacePath = this.workspaceService.resolveSessionWorkspaceDir(session);
+    const workspacePath = await this.workspaceService.resolveSessionWorkspaceDir(session);
 
     return { workspacePath };
   }
@@ -191,7 +190,7 @@ export class SessionsController {
       throw new Error("Session not found or unauthorized");
     }
 
-    const workspacePath = this.workspaceService.resolveSessionWorkspaceDir(session);
+    const workspacePath = await this.workspaceService.resolveSessionWorkspaceDir(session);
 
     const tree = await this.buildDirectoryTree(workspacePath, '', 0, 0);
     return { tree };
@@ -214,7 +213,7 @@ export class SessionsController {
     }
 
     // 确定工作目录路径（已自动确保目录存在）
-    const workspaceDir = this.workspaceService.resolveSessionWorkspaceDir(session);
+    const workspaceDir = await this.workspaceService.resolveSessionWorkspaceDir(session);
 
     // 解析文件路径并安全检查
     const resolvedPath = this.workspaceService.resolveFilePath(filePath, workspaceDir);
@@ -274,7 +273,7 @@ export class SessionsController {
     }
 
     // 确定工作目录路径（已自动确保目录存在）
-    const workspaceDir = this.workspaceService.resolveSessionWorkspaceDir(session);
+    const workspaceDir = await this.workspaceService.resolveSessionWorkspaceDir(session);
 
     // 解析目录路径并安全检查
     const resolvedDirPath = this.workspaceService.resolveFilePath(dirPath, workspaceDir);
@@ -379,7 +378,7 @@ export class SessionsController {
     }
 
     // 确定工作目录路径（已自动确保目录存在）
-    const workspaceDir = this.workspaceService.resolveSessionWorkspaceDir(session);
+    const workspaceDir = await this.workspaceService.resolveSessionWorkspaceDir(session);
 
     // 解析文件路径并安全检查
     const resolvedPath = this.workspaceService.resolveFilePath(filePath, workspaceDir);
@@ -413,6 +412,108 @@ export class SessionsController {
     // 流式返回文件内容
     const stream = fs.createReadStream(resolvedPath);
     stream.pipe(res);
+  }
+
+  @Delete("sessions/:id/workspace/file")
+  async deleteWorkspaceFile(
+    @Param("id") id: string,
+    @Query("path") filePath: string,
+    @CurrentUser() user: any,
+  ) {
+    // 验证会话归属权
+    const session = await this.sessionService.getSessionById(id, user.id);
+    if (!session) {
+      throw new HttpException("Session not found or unauthorized", HttpStatus.NOT_FOUND);
+    }
+
+    if (!filePath) {
+      throw new HttpException("File path is required", HttpStatus.BAD_REQUEST);
+    }
+
+    // 确定工作目录路径
+    const workspaceDir = await this.workspaceService.resolveSessionWorkspaceDir(session);
+
+    // 解析文件路径并安全检查
+    const resolvedPath = this.workspaceService.resolveFilePath(filePath, workspaceDir);
+
+    // 确保文件在工作目录内
+    if (!resolvedPath.startsWith(workspaceDir)) {
+      throw new HttpException("Access denied: Path is outside workspace directory", HttpStatus.FORBIDDEN);
+    }
+
+    if (!fs.existsSync(resolvedPath)) {
+      throw new HttpException("File or directory not found", HttpStatus.NOT_FOUND);
+    }
+
+    // 防止删除工作目录本身
+    if (resolvedPath === workspaceDir) {
+      throw new HttpException("Cannot delete workspace root directory", HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const stat = fs.statSync(resolvedPath);
+      await fsPromises.rm(resolvedPath, { recursive: true, force: true });
+      return { success: true, isDirectory: stat.isDirectory() };
+    } catch (error: any) {
+      throw new HttpException("Failed to delete: " + error.message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post("sessions/:id/workspace/rename")
+  async renameWorkspaceFile(
+    @Param("id") id: string,
+    @Body() body: { path: string; newName: string },
+    @CurrentUser() user: any,
+  ) {
+    // 验证会话归属权
+    const session = await this.sessionService.getSessionById(id, user.id);
+    if (!session) {
+      throw new HttpException("Session not found or unauthorized", HttpStatus.NOT_FOUND);
+    }
+
+    if (!body.path || !body.newName) {
+      throw new HttpException("Both path and newName are required", HttpStatus.BAD_REQUEST);
+    }
+
+    // 禁止非法文件名（包含路径分隔符）
+    if (body.newName.includes('/') || body.newName.includes('\\')) {
+      throw new HttpException("newName must not contain path separators", HttpStatus.BAD_REQUEST);
+    }
+
+    // 确定工作目录路径
+    const workspaceDir = await this.workspaceService.resolveSessionWorkspaceDir(session);
+
+    // 解析原文件路径并安全检查
+    const resolvedPath = this.workspaceService.resolveFilePath(body.path, workspaceDir);
+
+    // 确保文件在工作目录内
+    if (!resolvedPath.startsWith(workspaceDir)) {
+      throw new HttpException("Access denied: Path is outside workspace directory", HttpStatus.FORBIDDEN);
+    }
+
+    if (!fs.existsSync(resolvedPath)) {
+      throw new HttpException("File or directory not found", HttpStatus.NOT_FOUND);
+    }
+
+    // 构造新路径（同级目录下改名）
+    const parentDir = path.dirname(resolvedPath);
+    const newPath = path.join(parentDir, body.newName);
+
+    if (fs.existsSync(newPath)) {
+      throw new HttpException("Target name already exists", HttpStatus.CONFLICT);
+    }
+
+    try {
+      await fsPromises.rename(resolvedPath, newPath);
+      const stat = fs.statSync(newPath);
+      return {
+        success: true,
+        isDirectory: stat.isDirectory(),
+        newPath: path.relative(workspaceDir, newPath).replace(/\\/g, '/'),
+      };
+    } catch (error: any) {
+      throw new HttpException("Failed to rename: " + error.message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   private getMimeType(extension: string): string {

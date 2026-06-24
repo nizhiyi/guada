@@ -1,6 +1,7 @@
 <template>
-  <div class="flex flex-col flex-1 character-setting-panel">
-    <el-tabs ref="tabsInstRef" v-model="tabsValue" class="flex-1 flex flex-col character-tabs">
+  <div class="character-setting-panel-root">
+    <div class="flex flex-col flex-1 character-setting-panel">
+      <el-tabs ref="tabsInstRef" v-model="tabsValue" class="flex-1 flex flex-col character-tabs">
       <!-- 基础设置 -->
       <el-tab-pane name="basic" class="flex-1 overflow-hidden">
         <template #label>
@@ -63,7 +64,7 @@
                 </template>
                 <el-select v-model="characterForm.groupId" placeholder="请选择分组" clearable class="w-full max-w-md">
                   <el-option label="未分组" value="" />
-                  <el-option v-for="group in characterGroups" :key="group.id" :label="group.name" :value="group.id" />
+                  <el-option v-for="group in characterGroups" :key="group.id" :label="group.name" :value="group.id ?? ''" />
                 </el-select>
               </el-form-item>
             </el-form>
@@ -140,55 +141,58 @@
                 </el-select>
               </el-form-item>
 
-              <!-- 模型参数设置 (折叠面板) -->
-              <el-collapse v-model="activeModelParams" class="mb-6">
-                <el-collapse-item name="params">
-                  <template #title>
-                    <div class="flex items-center gap-2 text-base font-medium">
-                      <el-icon>
-                        <SettingOutlined />
-                      </el-icon>
-                      <span>模型参数设置</span>
+              <!-- 模型参数设置 -->
+              <!-- 覆盖模型参数开关 -->
+              <el-form-item prop="overrideModelParams">
+                <template #label>
+                  <div class="flex flex-col gap-1">
+                    <span class="text-base text-gray-900 dark:text-gray-100 font-medium">覆盖模型参数</span>
+                    <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">关闭后使用模型本身的默认参数。除非你明确知道自己在干什么，否则保持默认关闭</span>
+                  </div>
+                </template>
+                <el-switch v-model="characterForm.overrideModelParams" inline-prompt active-text="开启" inactive-text="关闭" />
+              </el-form-item>
+              <template v-if="characterForm.overrideModelParams">
+                <!-- 温度设置 -->
+                <el-form-item prop="modelTemperature">
+                  <template #label>
+                    <div class="flex flex-col gap-1">
+                      <span class="text-base text-gray-900 dark:text-gray-100 font-medium">温度</span>
+                      <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">控制输出的随机性和创造性，值越高越富有创意</span>
                     </div>
                   </template>
-                  <!-- 温度设置 -->
-                  <el-form-item prop="modelTemperature">
-                    <template #label>
-                      <div class="flex flex-col gap-1">
-                        <span class="text-base text-gray-900 dark:text-gray-100 font-medium">温度</span>
-                        <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">控制输出的随机性和创造性，值越高越富有创意</span>
-                      </div>
-                    </template>
-                    <el-slider-optional v-model="characterForm.modelTemperature" :min="0" :max="1.9" :step="0.1"
-                      show-input optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
-                  </el-form-item>
+                  <el-slider-optional v-model="characterForm.modelTemperature" :min="0" :max="1.9" :step="0.1"
+                    show-input optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
+                </el-form-item>
 
-                  <!-- Top P -->
-                  <el-form-item prop="modelTopP">
-                    <template #label>
-                      <div class="flex flex-col gap-1">
-                        <span class="text-base text-gray-900 dark:text-gray-100 font-medium">Top P</span>
-                        <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">核采样参数，控制输出词汇的多样性范围</span>
-                      </div>
-                    </template>
-                    <el-slider-optional v-model="characterForm.modelTopP" :min="0" :max="1" :step="0.1" show-input
-                      optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
-                  </el-form-item>
+                <!-- Top P -->
+                <el-form-item prop="modelTopP">
+                  <template #label>
+                    <div class="flex flex-col gap-1">
+                      <span class="text-base text-gray-900 dark:text-gray-100 font-medium">Top P</span>
+                      <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">核采样参数，控制输出词汇的多样性范围</span>
+                    </div>
+                  </template>
+                  <el-slider-optional v-model="characterForm.modelTopP" :min="0" :max="1" :step="0.1" show-input
+                    optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
+                </el-form-item>
 
-                  <!-- 频率惩罚 -->
-                  <el-form-item prop="modelFrequencyPenalty">
-                    <template #label>
-                      <div class="flex flex-col gap-1">
-                        <span class="text-base text-gray-900 dark:text-gray-100 font-medium">频率惩罚</span>
-                        <span
-                          class="text-xs text-gray-500 dark:text-gray-400 font-normal">降低重复内容的出现概率，正值减少重复，负值鼓励重复</span>
-                      </div>
-                    </template>
-                    <el-slider-optional v-model="characterForm.modelFrequencyPenalty" :min="-1.9" :max="1.9" :step="0.1"
-                      show-input optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
-                  </el-form-item>
-                </el-collapse-item>
-              </el-collapse>
+                <!-- 频率惩罚 -->
+                <el-form-item prop="modelFrequencyPenalty">
+                  <template #label>
+                    <div class="flex flex-col gap-1">
+                      <span class="text-base text-gray-900 dark:text-gray-100 font-medium">频率惩罚</span>
+                      <span
+                        class="text-xs text-gray-500 dark:text-gray-400 font-normal">降低重复内容的出现概率，正值减少重复，负值鼓励重复</span>
+                    </div>
+                  </template>
+                  <el-slider-optional v-model="characterForm.modelFrequencyPenalty" :min="-1.9" :max="1.9" :step="0.1"
+                    show-input optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
+                </el-form-item>
+              </template>
+              <el-alert title="提示" type="warning" :closable="false" show-icon class="mb-4">
+                修改模型配置不会同步修改已经创建的会话。新会话将自动继承当前配置。
+              </el-alert>
             </el-form>
           </div>
         </div>
@@ -248,7 +252,7 @@
                   </div>
                 </template>
                 <el-slider v-model="characterForm.compressionTriggerRatio" :min="0.5" :max="0.95" :step="0.05"
-                  show-input format-tooltip="(val) => `${Math.round(val * 100)}%`" class="w-full max-w-md" />
+                  show-input :format-tooltip="formatSliderTooltip" class="w-full max-w-md" />
               </el-form-item>
 
               <el-form-item label="保留目标" prop="compressionTargetRatio">
@@ -259,14 +263,14 @@
                   </div>
                 </template>
                 <el-slider v-model="characterForm.compressionTargetRatio" :min="0.2" :max="0.8" :step="0.05" show-input
-                  format-tooltip="(val) => `${Math.round(val * 100)}%`" class="w-full max-w-md" />
+                  :format-tooltip="(val) => `${Math.round(val * 100)}%`" class="w-full max-w-md" />
               </el-form-item>
 
               <el-form-item label="启用摘要生成" prop="summaryMode">
                 <template #label>
                   <div class="flex flex-col gap-1">
                     <span class="text-base text-gray-900 dark:text-gray-100 font-medium">摘要模式</span>
-                    <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">选择摘要生成方式：关闭、快速或迭代优化</span>
+                    <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">选择摘要生成方式：关闭、快速或记忆同步</span>
                   </div>
                 </template>
                 <div class="w-full max-w-md">
@@ -287,12 +291,12 @@
                         <span>快速摘要 - 单次调用生成，速度快</span>
                       </span>
                     </el-option>
-                    <el-option label="迭代摘要" value="iterative">
+                    <el-option label="记忆同步" value="memory_sync">
                       <span class="flex items-center gap-2">
                         <el-icon>
-                          <SyncOutlined />
+                          <FolderOutlined />
                         </el-icon>
-                        <span>迭代摘要 - 多轮优化，质量最高但耗时较长</span>
+                        <span>记忆同步 - 将历史对话压缩为结构化记忆，保持长期一致性</span>
                       </span>
                     </el-option>
                   </el-select>
@@ -302,7 +306,7 @@
               <el-alert title="提示" type="info" :closable="false" show-icon class="mb-6">
                 <p class="text-sm">• 触发阈值：控制何时启动压缩（建议 70%-85%）</p>
                 <p class="text-sm">• 保留目标：控制压缩后的 Token 占用（建议 40%-60%）</p>
-                <p class="text-sm">• 启用摘要：关闭后将仅裁剪工具结果，不生成语义摘要</p>
+                <p class="text-sm">• 记忆同步：开启后将历史对话压缩为结构化记忆，保持长期一致性；关闭后仅裁剪工具结果</p>
               </el-alert>
             </el-form>
           </div>
@@ -362,7 +366,7 @@
               <div v-else>
                 <!-- 网格布局：每行3列 -->
                 <div class="grid grid-cols-3 gap-3">
-                  <div v-for="tool in localTools" :key="tool.namespace" class="tool-item p-3 border rounded relative">
+                  <div v-for="tool in localTools" :key="tool.pluginId" class="tool-item p-3 border rounded relative dark:border-[#232428]">
                     <div class="flex items-start justify-between gap-2 mb-2">
                       <div class="font-medium text-sm flex-1 truncate">{{ tool.displayName }}</div>
                       <div class="flex items-center gap-2">
@@ -373,8 +377,8 @@
                             <SettingOutlined />
                           </el-icon>
                         </el-tooltip>
-                        <el-switch v-if="!allToolsEnabled" :model-value="isToolProviderEnabled(tool.namespace)"
-                          @update:model-value="handleLocalToolToggle(tool.namespace, $event)" inline-prompt
+                        <el-switch v-if="!allToolsEnabled" :model-value="isToolProviderEnabled(tool.pluginId)"
+                          @update:model-value="handleLocalToolToggle(tool.pluginId, $event)" inline-prompt
                           active-text="启动" inactive-text="禁用" size="default" />
                         <el-tag v-else type="primary" size="small">已启用</el-tag>
                       </div>
@@ -439,7 +443,7 @@
               </div>
 
               <div v-else>
-                <div v-for="server in mcpServers" :key="server.id" class="mcp-server-item p-3 border rounded mb-3">
+                <div v-for="server in mcpServers" :key="server.id" class="mcp-server-item p-3 border rounded mb-3 dark:border-[#232428]">
                   <div class="flex items-start justify-between">
                     <div class="flex-1 mr-4">
                       <div class="font-medium text-base mb-1">
@@ -469,6 +473,83 @@
                       :model-value="Array.isArray(characterForm.enabledMcpServers) && characterForm.enabledMcpServers.includes(server.id)"
                       @update:model-value="handleMcpServerToggle(server.id, $event)" :disabled="!server.enabled" />
                   </div>
+                </div>
+              </div>
+            </el-form>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <!-- Skills 技能 -->
+      <el-tab-pane name="skills" class="flex-1 overflow-hidden">
+        <template #label>
+          <div class="tab-label">
+            <el-icon :size="18">
+              <Code24Regular />
+            </el-icon>
+            <span>Skills</span>
+          </div>
+        </template>
+        <div class="px-0 py-6 h-full overflow-y-auto">
+          <div class="px-0">
+            <el-form label-position="top" size="large">
+              <!-- Skills 全局开关 -->
+              <el-form-item label="自动启用全部 Skills" label-position="left">
+                <div class="flex items-center gap-2">
+                  <el-tooltip content="开启后，角色将自动使用所有全局启用的技能，无需逐个选择" placement="top">
+                    <el-icon class="cursor-help text-gray-400 hover:text-gray-600" size="16">
+                      <QuestionCircleOutlined />
+                    </el-icon>
+                  </el-tooltip>
+                  <el-switch :model-value="characterForm.enabledSkills === true"
+                    @update:model-value="handleSkillsGlobalToggle" inline-prompt active-text="开" inactive-text="关" />
+                </div>
+              </el-form-item>
+
+              <el-alert title="Skills 说明" type="info" :closable="false" class="mb-4" show-icon>
+                <p class="text-sm" v-if="characterForm.enabledSkills === true">
+                  当前已启用所有全局启用的技能，下方列表仅供参考
+                </p>
+                <p class="text-sm" v-else>
+                  Skills 是专业技能模块，启用后 AI 助手可在对话中主动调用。每个技能可单独启用或禁用。
+                </p>
+              </el-alert>
+
+              <div v-if="loadingSkills" class="text-center py-8">
+                <el-icon class="is-loading" size="24">
+                  <LoadingOutlined />
+                </el-icon>
+                <div class="text-sm text-gray-500 mt-2">加载中...</div>
+              </div>
+
+              <div v-else-if="visibleSkills.length === 0" class="text-center text-gray-500 py-8">
+                <el-icon size="48" class="mb-2">
+                  <InfoCircleOutlined />
+                </el-icon>
+                <div>暂无可用的 Skills</div>
+                <div class="text-sm mt-2">请先到"插件 > Skills"中安装技能</div>
+              </div>
+
+              <div v-else class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));">
+                <div v-for="skill in visibleSkills" :key="skill.id"
+                  class="skill-item p-3 border rounded dark:border-[#232428]" :style="getSkillEffectiveEnabled(skill) ? {} : { opacity: 0.6 }">
+                  <div class="flex items-start justify-between gap-2 mb-2">
+                    <div class="font-medium text-sm flex-1 truncate">{{ skill.manifest?.name || skill.id }}</div>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <el-switch
+                        :model-value="getSkillEffectiveEnabled(skill)"
+                        :loading="updatingSkills.has(skill.id)"
+                        @update:model-value="(val) => handleSkillToggle(skill.id, val)"
+                        size="small"
+                        inline-prompt
+                        active-text="启用"
+                        inactive-text="禁用"
+                      />
+                      <el-tag v-if="skill.source === 'system'" type="success" size="small" effect="light">内置</el-tag>
+                      <el-tag v-if="skill.manifest?.version" type="info" size="small" effect="plain">v{{ skill.manifest.version }}</el-tag>
+                    </div>
+                  </div>
+                  <p class="text-xs text-gray-500 line-clamp-2 min-h-[2rem]">{{ skill.manifest?.description || '暂无描述' }}</p>
                 </div>
               </div>
             </el-form>
@@ -519,6 +600,7 @@
     </template>
   </el-dialog>
 
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -555,9 +637,12 @@ import {
   ApiOutlined,
   SettingOutlined,
   CloseOutlined,
+  FolderOutlined,
   ThunderboltOutlined,
   SyncOutlined
 } from '@vicons/antd'
+
+import { Code24Regular } from '@vicons/fluent'
 
 import { apiService } from '../../services/ApiService'
 
@@ -565,8 +650,14 @@ import { apiService } from '../../services/ApiService'
 import { usePopup } from '../../composables/usePopup'
 import AvatarPreview from '../ui/AvatarPreview.vue'
 import ElSliderOptional from '../ui/ElSliderOptional.vue'
+import { DEFAULT_SUMMARY_MODE } from '@/constants'
 
 const { toast, notify } = usePopup()
+
+// Slider 百分比格式化函数
+const formatSliderTooltip = (val: number): string => {
+  return `${Math.round(val * 100)}%`;
+};
 
 // Props
 const props = defineProps({
@@ -585,7 +676,7 @@ const props = defineProps({
         assistantName: '',
         assistantIdentity: '',
         systemPrompt: '',
-        modelId: null,
+        modelId: '',
         memoryType: null,
         modelTemperature: null,
         modelTopP: null,
@@ -619,7 +710,6 @@ const modelFormRef = ref(null)
 const memoryFormRef = ref(null)
 
 const tabsValue = ref(props.tab)
-const activeModelParams = ref([]) // 默认折叠模型参数
 
 // 表单数据
 const characterForm = reactive({
@@ -637,13 +727,15 @@ const characterForm = reactive({
   modelTemperature: null,
   modelTopP: null,
   modelFrequencyPenalty: null,
+  overrideModelParams: false,
   maxMemoryLength: null,
   useUserPrompt: false,
   enabledTools: [],  // 启用的本地工具
   enabledMcpServers: [],  // 启用的 MCP 服务器 ID 数组
+  enabledSkills: {},       // 按角色启用的技能 { skillId: true/false }
   compressionTriggerRatio: 0.8, // 触发阈值
   compressionTargetRatio: 0.5, // 保留目标
-  summaryMode: 'fast', // 摘要模式：'disabled' | 'fast' | 'iterative'
+  summaryMode: DEFAULT_SUMMARY_MODE, // 摘要模式：'disabled' | 'fast' | 'memory_sync'
   maxTokensLimit: null, // Token 上限（null 表示不限制）
 })
 
@@ -655,11 +747,7 @@ const basicRules = {
   ]
 }
 
-const promptRules = {
-  systemPrompt: [
-    { min: 2, max: 8000, message: '详细设定长度在8000个字符之间', trigger: ['input', 'blur'] }
-  ]
-}
+const promptRules = {}
 
 const modelRules = {
   // 模型改为可选项，移除必填验证
@@ -690,7 +778,7 @@ const modelOptions = computed(() => {
   // 添加"使用默认模型"选项
   options.push({
     label: '使用默认模型',
-    value: null,
+    value: '',
     key: 'default'
   })
 
@@ -704,9 +792,9 @@ const modelOptions = computed(() => {
       // 添加分组标签
       options.push({
         label: provider.name,
+        value: provider.id,
         key: provider.id,
         disabled: true,
-
       })
 
       // 添加该分组下的模型选项
@@ -725,6 +813,11 @@ const modelOptions = computed(() => {
 // MCP 服务器数据
 const mcpServers = ref([]);
 
+// Skills 数据
+const skillsList = ref([]);
+const loadingSkills = ref(false);
+const updatingSkills = ref(new Set());
+
 // 角色分组数据
 const characterGroups = ref([]);
 
@@ -732,7 +825,7 @@ const characterGroups = ref([]);
 const localTools = ref([]);
 const loadingTools = ref(false);
 
-// 角色工具设置（namespace -> boolean | 'all'）
+// 角色工具设置（pluginId -> boolean | 'all'）
 const characterToolSettings = ref({});
 
 // Token 上限显示值（用于格式化显示）
@@ -751,14 +844,42 @@ const allToolsEnabled = computed(() => {
   return characterToolSettings.value === true;
 });
 
+// 计算技能的最终显示状态
+const getSkillEffectiveEnabled = (skill) => {
+  // 全局启用模式：所有技能启用
+  if (characterForm.enabledSkills === true) return true;
+  // 角色级优先（对象模式）
+  if (typeof characterForm.enabledSkills === 'object' && skill.id in characterForm.enabledSkills) {
+    return characterForm.enabledSkills[skill.id];
+  }
+  // 无角色级配置 → 使用全局状态
+  return skill.enabled !== false;
+};
+
+// 角色面板可见的技能：全局启用 或 有角色级覆盖
+const visibleSkills = computed(() => {
+  return skillsList.value.filter(skill => {
+    // 如果全局禁用 且 没有角色级覆盖（全局启用模式下也隐藏全局禁用的技能）
+    if (skill.enabled === false) {
+      // 全局启用模式不覆盖全局禁用
+      if (characterForm.enabledSkills === true) return false;
+      // 对象模式下检查是否有角色级覆盖
+      if (typeof characterForm.enabledSkills !== 'object' || !(skill.id in characterForm.enabledSkills)) {
+        return false;
+      }
+    }
+    return true;
+  });
+});
+
 // 判断某个工具提供者是否启用（用于 Switch 显示）
-const isToolProviderEnabled = (namespace) => {
+const isToolProviderEnabled = (pluginId) => {
   // 如果 characterToolSettings 是布尔值，直接返回
   if (typeof characterToolSettings.value === 'boolean') {
     return characterToolSettings.value;
   }
 
-  const config = characterToolSettings.value[namespace];
+  const config = characterToolSettings.value[pluginId];
 
   // true 表示全部启用
   if (config === true) return true;
@@ -769,7 +890,7 @@ const isToolProviderEnabled = (namespace) => {
   // 数组表示部分启用，数组长度 > 0 表示启用
   if (Array.isArray(config)) return config.length > 0;
 
-  // 默认禁用（当配置为对象但某个 namespace 未配置时）
+  // 默认禁用（当配置为对象但某个 pluginId 未配置时）
   return false;
 };
 
@@ -788,15 +909,16 @@ watch(() => props.data, (newVal) => {
   characterForm.avatarUrl = newVal.avatarUrl || '';
   // groupId: null 或 undefined 转换为空字符串，以便 el-select 正确显示
   characterForm.groupId = newVal.groupId || '';  // 加载分组 ID
-  characterForm.modelId = newVal.modelId || null;
+  characterForm.modelId = newVal.modelId || '';
 
   characterForm.assistantName = newVal.settings?.assistantName || '';
   characterForm.assistantIdentity = newVal.settings?.assistantIdentity || '';
   characterForm.systemPrompt = newVal.settings?.systemPrompt || '';
   characterForm.memoryType = newVal.settings?.memoryType || 'sliding_window';
-  characterForm.modelTemperature = newVal.settings?.modelTemperature || null;
-  characterForm.modelTopP = newVal.settings?.modelTopP || null;
-  characterForm.modelFrequencyPenalty = newVal.settings?.modelFrequencyPenalty || null;
+  characterForm.modelTemperature = newVal.settings?.modelTemperature ?? null;
+  characterForm.modelTopP = newVal.settings?.modelTopP ?? null;
+  characterForm.modelFrequencyPenalty = newVal.settings?.modelFrequencyPenalty ?? null;
+  characterForm.overrideModelParams = newVal.settings?.overrideModelParams ?? false;
   characterForm.useUserPrompt = newVal.settings?.useUserPrompt || false;
 
   // 从 memory 分组加载记忆与压缩配置
@@ -804,7 +926,7 @@ watch(() => props.data, (newVal) => {
   characterForm.maxMemoryLength = memoryConfig.maxMemoryLength ?? newVal.settings?.maxMemoryLength ?? null;
   characterForm.compressionTriggerRatio = memoryConfig.compressionTriggerRatio ?? newVal.settings?.compressionTriggerRatio ?? 0.8;
   characterForm.compressionTargetRatio = memoryConfig.compressionTargetRatio ?? newVal.settings?.compressionTargetRatio ?? 0.5;
-  characterForm.summaryMode = memoryConfig.summaryMode ?? 'fast'; // 默认快速模式
+  characterForm.summaryMode = memoryConfig.summaryMode ?? DEFAULT_SUMMARY_MODE; // 默认记忆同步模式
   characterForm.maxTokensLimit = memoryConfig.maxTokensLimit ?? newVal.settings?.maxTokensLimit ?? null;
   // 同步更新显示值
   maxTokensLimitDisplay.value = formatTokenValue(characterForm.maxTokensLimit);
@@ -832,6 +954,16 @@ watch(() => props.data, (newVal) => {
     characterForm.enabledMcpServers = [];
   }
 
+  // 加载角色技能偏好（支持 boolean = 全部启用，object = 逐一选择）
+  const skillsConfig = newVal.settings?.skills;
+  if (skillsConfig === true || skillsConfig === false) {
+    characterForm.enabledSkills = skillsConfig;
+  } else if (typeof skillsConfig === 'object' && !Array.isArray(skillsConfig)) {
+    characterForm.enabledSkills = { ...skillsConfig };
+  } else {
+    characterForm.enabledSkills = {};
+  }
+
 }, { immediate: true })
 
 const handleAvatarChanged = (file) => {
@@ -857,6 +989,30 @@ const handleMcpServerToggle = (serverId, enabled) => {
   console.log(`MCP 服务器 ${serverId} ${enabled ? '启用' : '禁用'}, 当前列表:`, characterForm.enabledMcpServers);
 }
 
+// ── Skills 切换 ──
+const handleSkillToggle = (skillId, enabled) => {
+  // 仅更新本地角色配置，不调用全局 API
+  // 如果当前是全局启用模式，不允许单独切换
+  if (characterForm.enabledSkills === true) {
+    console.warn('当前为全局启用模式，无法单独切换技能');
+    return;
+  }
+  characterForm.enabledSkills[skillId] = enabled;
+  // 触发响应式更新
+  characterForm.enabledSkills = { ...characterForm.enabledSkills };
+  console.log(`角色技能 ${skillId} ${enabled ? '启用' : '禁用'}`);
+};
+
+// Skills 全局开关切换处理
+const handleSkillsGlobalToggle = (enabled) => {
+  if (enabled) {
+    characterForm.enabledSkills = true;
+  } else {
+    characterForm.enabledSkills = {};
+  }
+  console.log(`角色技能全局启用 ${enabled ? '开启' : '关闭'}`);
+};
+
 // MCP 全局开关切换处理
 const handleMcpGlobalToggle = (enabled) => {
   if (enabled) {
@@ -877,21 +1033,20 @@ const loadLocalTools = async () => {
     // 创建角色时使用特殊 ID，编辑角色时使用真实 ID
     const characterId = props.data?.id || '__new_character__';
     const response = await apiService.fetchCharacterTools(characterId);
-    // 只显示全局启用的工具
-    localTools.value = (response.tools || []).filter(tool => tool.enabled);
 
-    // 初始化角色工具设置
-    const toolsConfig = response.characterTools;
-    if (toolsConfig === true || toolsConfig === false) {
-      // 整体开关模式
-      characterToolSettings.value = toolsConfig;
-    } else if (typeof toolsConfig === 'object') {
-      // 单独控制模式
-      characterToolSettings.value = { ...toolsConfig };
-    } else {
-      // 默认启用全部
-      characterToolSettings.value = false;
+    // API 返回 plugins[]，每个元素含 enabled 有效状态
+    const plugins = response.plugins || [];
+
+    // 本地工具列表：过滤掉 MCP 和 Skills（有独立 Tab）
+    localTools.value = plugins.filter(p => !p.isMcp && !p.isSkill);
+
+    // 从 plugins 的 enabled 字段反向构建角色工具配置
+    const toolsConfig = {};
+    for (const plugin of plugins) {
+      if (plugin.isMcp || plugin.isSkill) continue; // MCP / Skills 由单独逻辑处理
+      toolsConfig[plugin.pluginId] = plugin.enabled;
     }
+    characterToolSettings.value = toolsConfig;
   } catch (error) {
     console.error('加载本地工具失败:', error);
     toast.error('加载本地工具失败');
@@ -908,14 +1063,14 @@ const handleAllToolsToggle = (enabled) => {
 }
 
 // 本地工具开关切换处理
-const handleLocalToolToggle = (namespace, enabled) => {
+const handleLocalToolToggle = (pluginId, enabled) => {
   // 只更新本地状态，不立即调用 API
   if (typeof characterToolSettings.value !== 'object') {
     // 如果之前是整体开关模式，转换为对象模式
     characterToolSettings.value = {};
   }
-  characterToolSettings.value[namespace] = enabled;
-  console.log(`本地工具 ${namespace} ${enabled ? '启用' : '禁用'}`);
+  characterToolSettings.value[pluginId] = enabled;
+  console.log(`本地工具 ${pluginId} ${enabled ? '启用' : '禁用'}`);
 }
 
 // 打开工具配置对话框
@@ -928,8 +1083,8 @@ const openToolConfig = (tool) => {
     // 整体开关模式：所有工具都使用同一个配置
     config = characterToolSettings.value;
   } else if (typeof characterToolSettings.value === 'object') {
-    // 单独控制模式：取对应 namespace 的配置
-    config = characterToolSettings.value[tool.namespace];
+    // 单独控制模式：取对应 pluginId 的配置
+    config = characterToolSettings.value[tool.pluginId];
   } else {
     // 其他情况：默认为 undefined
     config = undefined;
@@ -971,7 +1126,7 @@ const openToolConfig = (tool) => {
 const saveToolConfig = () => {
   if (!currentToolConfig.value) return;
 
-  const namespace = currentToolConfig.value.namespace;
+  const pluginId = currentToolConfig.value.pluginId;
   const allTools = (currentToolConfig.value.tools || []).map(t => t.name);
 
   // 确保是对象模式
@@ -982,19 +1137,19 @@ const saveToolConfig = () => {
   // 判断是否全部选中
   if (selectedSubTools.value.length === 0) {
     // 全部未选中：设置为 false
-    characterToolSettings.value[namespace] = false;
+    characterToolSettings.value[pluginId] = false;
   } else if (selectedSubTools.value.length === allTools.length && selectedSubTools.value.length > 0) {
     // 全部选中：根据是否使用全局开关决定保存方式
     if (isUsingGlobalToggle.value) {
       // 通过"启动全部"开关启用：设置为 true，新增工具自动启用
-      characterToolSettings.value[namespace] = true;
+      characterToolSettings.value[pluginId] = true;
     } else {
       // 手动逐个选择全部：保持数组形式，新增工具默认禁用
-      characterToolSettings.value[namespace] = [...selectedSubTools.value];
+      characterToolSettings.value[pluginId] = [...selectedSubTools.value];
     }
   } else {
     // 部分选中：保存为数组
-    characterToolSettings.value[namespace] = [...selectedSubTools.value];
+    characterToolSettings.value[pluginId] = [...selectedSubTools.value];
   }
 
   toolConfigDialogVisible.value = false;
@@ -1041,17 +1196,23 @@ const handleAllSubToolsToggle = (enabled) => {
   }
 };
 
-// 获取工具的显示名称（去除 namespace 前缀）
+// 获取工具的显示名称（工具名不再拼接命名空间前缀，直接返回原名称）
 const getToolDisplayName = (toolName) => {
-  if (!toolName) return '';
-  // 检查是否包含 __ 前缀（如 shell__execute_command）
-  const parts = toolName.split('__');
-  // 如果有前缀且前缀长度 > 1，返回第二部分
-  if (parts.length > 1 && parts[0].length > 0) {
-    return parts.slice(1).join('__');
+  return toolName || '';
+};
+
+const loadSkills = async () => {
+  loadingSkills.value = true;
+  try {
+    const response = await apiService.fetchSkills();
+    skillsList.value = Array.isArray(response?.items) 
+      ? response.items.filter(s => s.enabled !== false) 
+      : [];
+  } catch (err) {
+    console.error('加载 Skills 失败:', err);
+  } finally {
+    loadingSkills.value = false;
   }
-  // 否则直接返回原名称
-  return toolName;
 };
 
 const loadModels = async () => {
@@ -1106,6 +1267,7 @@ onMounted(async () => {
   // if (!isSimpleStyle.value)
   loadModels();
   loadMCPServers();
+  loadSkills();
   loadCharacterGroups();  // 加载分组列表
   // 注意：工具列表由 watch 自动加载（immediate: true）
 })
@@ -1135,7 +1297,7 @@ const getFormData = () => {
     'avatarFile': characterForm.avatarFile,
     'groupId': characterForm.groupId === '' ? null : characterForm.groupId,
     'identity': characterForm.identity,
-    'modelId': characterForm.modelId,
+    'modelId': characterForm.modelId === '' ? null : characterForm.modelId,
     'settings': {
       'assistantName': characterForm.assistantName,
       'assistantIdentity': characterForm.assistantIdentity,
@@ -1144,6 +1306,7 @@ const getFormData = () => {
       'modelTemperature': characterForm.modelTemperature,
       'modelTopP': characterForm.modelTopP,
       'modelFrequencyPenalty': characterForm.modelFrequencyPenalty,
+      'overrideModelParams': characterForm.overrideModelParams,
       'useUserPrompt': characterForm.useUserPrompt,
       // 记忆与压缩配置分组
       'memory': {
@@ -1155,6 +1318,7 @@ const getFormData = () => {
       },
       'tools': characterToolSettings.value,
       'mcpServers': characterForm.enabledMcpServers,
+      'skills': characterForm.enabledSkills,
     }
   }
   return finalData;
@@ -1306,7 +1470,16 @@ defineExpose({
 
 .tool-item:hover {
   border-color: var(--el-color-primary);
-  background-color: #f5f7fa;
+  background-color: var(--el-fill-color-lighter);
+}
+
+.skill-item {
+  transition: all 0.2s;
+}
+
+.skill-item:hover {
+  border-color: var(--el-color-primary-light-5);
+  background-color: var(--el-fill-color-lighter);
 }
 
 /* 工具配置对话框样式 */

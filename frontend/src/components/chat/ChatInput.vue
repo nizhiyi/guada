@@ -157,61 +157,13 @@
       <!-- 会话设置模态框 -->
       <SessionSettingsDialog v-model:visible="settingsDialogVisible" :config="sessionMemoryConfig"
         @confirm="applySessionSettings" @cancel="settingsDialogVisible = false" />
-
-      <!-- 工作目录设置弹窗 -->
-      <WorkspaceSettingsDialog v-model:visible="workspaceDialogVisible"
-        :current-workspace-path="props.config?.workspacePath || null" @confirm="applyWorkspaceSettings" />
     </div>
-    <div class="mt-1 w-full flex justify-start px-1 gap-1">
-      <!-- 工作目录按钮 -->
-      <el-button class="tool-btn mr-0.5" @click.stop="openWorkspaceDialog" text>
-        <el-icon size="22">
-          <FolderOpen24Regular />
-        </el-icon>
-        <template v-if="mode == 'create'">
-          <span class="text-xs font-medium">
-            工作目录：{{ props.config?.workspacePath || '自动创建' }}
-          </span>
-          <el-icon size="16" class="ml-0.5">
-            <ChevronUpDown16Regular />
-          </el-icon>
-        </template>
-        <template v-else>
-          <span class="text-xs font-medium">{{ props.config?.workspacePath || '打开工作目录' }}</span>
-        </template>
-      </el-button>
-
-      <!-- 分组选择按钮（仅创建模式） -->
-      <template v-if="mode == 'create'">
-        <el-button ref="groupButtonRef" class="tool-btn mr-0.5" @click.stop="openGroupSelector" text>
-          <span class="text-xs font-medium">
-            分组：{{ selectedGroupName }}
-          </span>
-          <el-icon size="16" class="ml-0.5">
-            <ChevronUpDown16Regular />
-          </el-icon>
-        </el-button>
+    <ChatInputToolbar :mode="mode" :config="props.config" @config-change="onToolbarConfigChange"
+      @toggle-workspace-pane="$emit('toggle-workspace-pane')">
+      <template #actions>
+        <slot name="toolbar-actions" />
       </template>
-    </div>
-
-    <!-- 分组选择弹窗 -->
-    <el-dialog v-model="groupSelectorVisible" title="请选择分组" width="360px" :close-on-click-modal="false">
-      <div class="space-y-1 py-2">
-        <div v-for="g in groupSelectorOptions" :key="g.value"
-          class="flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer transition-all duration-200 text-sm"
-          :class="selectedGroupId === g.value ? 'bg-(--color-sidebar-bg-active) text-(--color-sidebar-text-active)' : 'text-(--color-text-gray) hover:bg-(--color-sidebar-bg-hover) hover:text-(--color-sidebar-text-hover)'"
-          @click="selectGroup(g.value)">
-          <el-icon class="w-4 h-4">
-            <Folder20Regular />
-          </el-icon>
-          <span class="flex-1">{{ g.label }}</span>
-          <el-icon v-if="selectedGroupId === g.value" class="w-4 h-4">
-            <Checkmark16Filled />
-          </el-icon>
-        </div>
-      </div>
-    </el-dialog>
-
+    </ChatInputToolbar>
   </div>
 </template>
 
@@ -231,7 +183,7 @@ import KnowledgeBasePanel from './chat-input/KnowledgeBasePanel.vue';
 import SessionSettingsDialog from './chat-input/SessionSettingsDialog.vue';
 import ThinkingEffortPopover from './chat-input/ThinkingEffortPopover.vue';
 import ModelSelectorPanel from './chat-input/ModelSelectorPanel.vue';
-import WorkspaceSettingsDialog from './chat-input/WorkspaceSettingsDialog.vue';
+import ChatInputToolbar from './chat-input/ChatInputToolbar.vue';
 import { SkillNode } from '@/utils/skillNode';
 import { getModelDisplayName, getModelAvatarPath, getModelThinkingEfforts, getThinkingEffortLabel } from '@/utils/modelUtils';
 import { OpenAI } from "@/components/icons";
@@ -244,8 +196,8 @@ import {
 import { Thinking2 } from "@/components/icons";
 import {
   TextT24Regular, LightbulbFilament24Regular, LightbulbFilament24Filled, WrenchScrewdriver24Regular, Image24Regular, Attach24Regular,
-  Send24Filled, Stop24Filled, Star24Regular, Star24Filled, Settings24Regular, BookSearch24Regular, FolderOpen24Regular, ChevronUpDown16Regular,
-  Apps20Regular, Folder20Regular, Checkmark16Filled
+  Send24Filled, Stop24Filled, Star24Regular, Star24Filled, Settings24Regular, BookSearch24Regular,
+  Apps20Regular
 } from '@vicons/fluent'
 import {
   ThunderboltOutlined,
@@ -254,9 +206,6 @@ import {
 import { usePopup } from '@/composables/usePopup';
 import { useBreakpoints, breakpointsTailwind } from '@vueuse/core'
 import { apiService } from '@/services/ApiService';
-import { useSessionGroupStore, UNGROUPED_ID } from '@/stores/sessionGroup';
-
-const sessionGroupStore = useSessionGroupStore();
 
 const breakpoints = useBreakpoints(breakpointsTailwind)
 const isMobile = breakpoints.smaller('lg') // md = 768px
@@ -359,7 +308,7 @@ const props = defineProps({
         maxMemoryLength: null,
         compressionTriggerRatio: 0.8,
         compressionTargetRatio: 0.5,
-        summaryMode: 'fast', // 默认快速模式
+        summaryMode: 'memory_sync', // 默认记忆同步模式
         maxTokensLimit: null,
       },
       knowledgeBaseIds: [],
@@ -465,67 +414,6 @@ const localThinkingEffort = ref<string>('off'); // 'off' | 'low' | 'medium' | 'h
 const thinkingButtonRef = ref<any>(null);
 const thinkingPopoverVisible = ref(false);
 
-// 工作目录设置相关
-const workspaceDialogVisible = ref(false);
-
-// 分组选择相关
-const groupSelectorVisible = ref(false);
-const groupButtonRef = ref<any>(null);
-
-// 初始化时加载分组列表（store 已做防重复请求处理）
-sessionGroupStore.loadGroups();
-
-/**
- * 分组选择选项（包含虚拟的未分组）
- */
-const groupSelectorOptions = computed(() => {
-  const options = sessionGroupStore.sortedGroups.map(g => ({
-    label: g.name,
-    value: g.id
-  }));
-  // 始终添加未分组选项
-  options.unshift({
-    label: '任务列表',
-    value: UNGROUPED_ID
-  });
-  return options;
-});
-
-/**
- * 当前选中的分组名称
- */
-const selectedGroupName = computed(() => {
-  const groupId = props.config?.groupId;
-  if (groupId === UNGROUPED_ID || groupId === undefined || groupId === null) {
-    return '任务列表';
-  }
-  const group = sessionGroupStore.sortedGroups.find(g => g.id === groupId);
-  return group?.name || '任务列表';
-});
-
-/**
- * 当前选中的分组ID
- */
-const selectedGroupId = computed(() => {
-  return props.config?.groupId || UNGROUPED_ID;
-});
-
-/**
- * 打开分组选择弹窗
- */
-const openGroupSelector = () => {
-  groupSelectorVisible.value = true;
-};
-
-/**
- * 选择分组
- */
-const selectGroup = (groupId: string) => {
-  const groupIdToSet = groupId === UNGROUPED_ID ? null : groupId;
-  emit('config-change', { groupId: groupIdToSet });
-  groupSelectorVisible.value = false;
-};
-
 const thinkingEffortOptions = computed(() => {
   if (!currentModel.value) return [];
   return getModelThinkingEfforts(currentModel.value, providers.value);
@@ -581,9 +469,11 @@ const sessionMemoryConfig = computed(() => {
   if (!config) return {};
 
   return {
-    useCustom: config.memoryEnabled ?? true, // 将 memoryEnabled 映射为 useCustom
-    ...config.memory, // 展开 memory 对象的其他属性
-    workspacePath: config.workspacePath || null, // 工作目录路径
+    modelOverrideEnabled: config.modelOverrideEnabled ?? false,
+    model: config.model ?? null,
+    useCustom: config.memoryEnabled ?? true,
+    ...config.memory,
+    workspacePath: config.workspacePath || null,
   };
 });
 
@@ -694,11 +584,11 @@ const handleModelSelect = (modelId: string) => {
     const nonOffOptions = options.filter(e => e !== 'off');
 
     if (currentEffort === 'off') {
-      // 原来就是 'off'，保持 'off'
-      newThinkingEffort = 'off';
+      // 原来是 off 但新选项不含 off → 选最小思考档
+      newThinkingEffort = nonOffOptions.length > 0 ? nonOffOptions[0] : 'off';
     } else {
-      // 原来是非 'off'，优先选择第一个非 'off' 选项
-      newThinkingEffort = nonOffOptions.length > 0 ? nonOffOptions[nonOffOptions.length - 1] : 'off';
+      // 原来的非 off 值失效 → 选中间值
+      newThinkingEffort = nonOffOptions.length > 0 ? nonOffOptions[Math.floor(nonOffOptions.length / 2)] : 'off';
     }
   }
 
@@ -744,22 +634,12 @@ const applySessionSettings = (configChanges: any) => {
   settingsDialogVisible.value = false
 };
 
-// 打开工作目录设置弹窗
-const openWorkspaceDialog = () => {
-  // 对话模式下仅触发窗格切换事件，由父组件控制显隐
-  if (props.mode === 'chat') {
-    emit('toggle-workspace-pane');
-    return;
+// Toolbar 配置变更中转
+const onToolbarConfigChange = (payload: any) => {
+  if (payload.workspacePath) {
+    ElMessage.success('工作目录已更新');
   }
-  // 创建模式下打开工作目录设置弹窗
-  workspaceDialogVisible.value = true;
-};
-
-// 应用工作目录设置
-const applyWorkspaceSettings = (workspacePath: string | null) => {
-  console.log('Applying workspace path:', workspacePath);
-  emit('config-change', { workspacePath });
-  ElMessage.success('工作目录已更新');
+  emit('config-change', payload);
 };
 
 // 打开知识库面板
@@ -942,7 +822,7 @@ const handlePaste = async (event) => {
   } else if (pastedText) {
     // 短文本 → 插入到 Tiptap 编辑器
     if (editor.value) {
-      editor.value.chain().focus().insertContent(pastedText).run();
+      editor.value.chain().focus().insertContent(pastedText).scrollIntoView().run();
     }
   }
 
@@ -1208,7 +1088,7 @@ watch(editorContent, () => {
   nextTick(() => {
     const pmEl = document.querySelector('.message-editor .ProseMirror');
     if (pmEl) {
-      pmEl.style.minHeight = '56px';
+      pmEl.style.minHeight = '58px';
       pmEl.style.maxHeight = '240px';
       isInputExpanded.value = pmEl.scrollHeight > 60;
     }
@@ -1289,7 +1169,7 @@ onMounted(() => {
           const pmEl = document.querySelector('.message-editor .ProseMirror');
           if (pmEl) {
             const height = Math.min(pmEl.scrollHeight, 240);
-            pmEl.style.minHeight = '56px';
+            pmEl.style.minHeight = '58px';
             pmEl.style.maxHeight = '240px';
             isInputExpanded.value = pmEl.scrollHeight > 60;
           }
@@ -1311,6 +1191,31 @@ onMounted(() => {
     });
     editor.value = tiptapEditor;
     console.log('[ChatInput] Tiptap editor created:', tiptapEditor);
+
+    // 将编辑器处理器挂载到 DOM 元素，供全局右键菜单使用（解耦方式）
+    const editorEl = document.querySelector('.message-editor');
+    if (editorEl) {
+      (editorEl as any).__editorHandler = {
+        getSelectionText: () => {
+          return tiptapEditor.state.doc.textBetween(
+            tiptapEditor.state.selection.from,
+            tiptapEditor.state.selection.to,
+            '',
+          );
+        },
+        paste: (text: string) => {
+          tiptapEditor.chain().focus().insertContent(text).scrollIntoView().run();
+        },
+        deleteSelection: () => {
+          tiptapEditor.commands.deleteSelection();
+        },
+        selectAll: () => {
+          tiptapEditor.commands.focus();
+          tiptapEditor.commands.selectAll();
+        },
+      };
+      editorEl.setAttribute('data-editor-handler', 'true');
+    }
   } catch (err) {
     console.error('[ChatInput] Tiptap editor init failed:', err);
   }
@@ -1353,7 +1258,7 @@ onUnmounted(() => {
 /* Tiptap 编辑器样式 - 模拟 textarea */
 :deep(.message-editor .ProseMirror) {
   width: 100%;
-  min-height: 56px;
+  min-height: 58px;
   max-height: 240px;
   border: none;
   resize: none;
@@ -1511,7 +1416,7 @@ onUnmounted(() => {
   overflow-y: auto;
   box-sizing: border-box;
   transition: height 0.2s ease;
-  min-height: 56px;
+  min-height: 58px;
 }
 
 
@@ -1545,6 +1450,18 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: all 0.2s;
+}
+
+
+/* 工作目录按钮：继承 tool-btn 样式但高度自适应 */
+.workspace-btn {
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 3px;
+  display: flex;
+  align-items: center;
   transition: all 0.2s;
 }
 

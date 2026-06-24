@@ -9,12 +9,12 @@ import {
 import { IProtocolAdapter } from "./base.adapter";
 import {
   MessageRecord,
-  InternalToolDefinition,
   LLMCompletionParams,
   LLMResponseChunk,
   ToolCallItem,
 } from "../types/llm.types";
-import { ProviderConfig, ConnectionTestResult } from "../types/provider.types";
+import { ToolDefinition } from "../../tools/interfaces/tool-provider.interface";
+import { ProviderConfig, ConnectionTestResult, RemoteModel } from "../types/provider.types";
 
 export class GeminiAdapter implements IProtocolAdapter {
   readonly protocol = "gemini";
@@ -51,6 +51,16 @@ export class GeminiAdapter implements IProtocolAdapter {
         details: error,
       };
     }
+  }
+
+  /**
+   * TODO: 实现 Gemini 模型列表同步
+   * 使用 GET https://generativelanguage.googleapis.com/v1/models
+   */
+  async syncRemoteModels(config: ProviderConfig): Promise<RemoteModel[]> {
+    // Gemini 官方 API 目前不提供公开的模型列表接口
+    this.logger.warn("Gemini model list sync not yet implemented");
+    return [];
   }
 
   async *chatCompletion(
@@ -94,6 +104,7 @@ export class GeminiAdapter implements IProtocolAdapter {
 
       for await (const chunk of result.stream) {
         const responseChunk: LLMResponseChunk = {
+          type: "text",
           content: null,
           reasoningContent: null,
           finishReason: null,
@@ -110,6 +121,7 @@ export class GeminiAdapter implements IProtocolAdapter {
         // 处理工具调用 (Gemini 通常在流结束时提供完整的函数调用)
         const functionCalls = chunk.functionCalls();
         if (functionCalls && functionCalls.length > 0) {
+          responseChunk.type = "tool_call";
           responseChunk.toolCalls = functionCalls.map(
             (fc, index): ToolCallItem => ({
               id: fc.name, // Gemini 默认不提供唯一 ID，通常用名称代替
@@ -125,10 +137,24 @@ export class GeminiAdapter implements IProtocolAdapter {
       }
 
       // 模拟结束块
+      // Gemini 流结束后，尝试获取 usage_metadata（缓存统计 + token 统计）
+      const usageMetadata = (result as any)?.response?.usageMetadata || (result as any)?.usageMetadata;
+      const geminiUsage = usageMetadata
+        ? {
+            promptTokens: usageMetadata.promptTokenCount ?? 0,
+            completionTokens: usageMetadata.candidatesTokenCount ?? 0,
+            totalTokens: usageMetadata.totalTokenCount ?? 0,
+            cachedTokens: usageMetadata.cachedContentTokenCount
+              ? { read: usageMetadata.cachedContentTokenCount }
+              : undefined,
+          }
+        : null;
+
       yield {
+        type: "finish",
         content: null,
         finishReason: "stop",
-        usage: null,
+        usage: geminiUsage,
       };
     } catch (error) {
       this.logger.error("Gemini API error:", error);
@@ -191,7 +217,7 @@ export class GeminiAdapter implements IProtocolAdapter {
     });
   }
 
-  private convertTools(tools: InternalToolDefinition[]): any[] {
+  private convertTools(tools: ToolDefinition[]): any[] {
     return tools.map((tool) => ({
       name: tool.name,
       description: tool.description,

@@ -12,6 +12,26 @@ import type { Message } from './message'
 // ========== 流式响应类型 ==========
 
 /**
+ * 子 Agent 开始事件
+ */
+export interface StreamSubAgentStartEvent {
+    type: 'sub_agent_start'
+    subSessionId: string
+    name: string
+}
+
+/**
+ * 子 Agent 完成事件
+ */
+export interface StreamSubAgentFinishEvent {
+    type: 'sub_agent_finish'
+    subSessionId: string
+    status: 'completed' | 'error'
+    result?: string
+    error?: string
+}
+
+/**
  * 流式事件类型联合
  */
 export type StreamEvent =
@@ -23,6 +43,8 @@ export type StreamEvent =
     | StreamFinishEvent
     | StreamCompressionStartEvent
     | StreamCompressionErrorEvent
+    | StreamSubAgentStartEvent       // 新增
+    | StreamSubAgentFinishEvent      // 新增
 
 /**
  * 创建消息事件
@@ -40,7 +62,7 @@ export interface StreamCreateEvent {
  */
 export interface StreamThinkEvent {
     type: 'think'
-    msg: string
+    reasoningContent: string
 }
 
 /**
@@ -49,7 +71,6 @@ export interface StreamThinkEvent {
 export interface StreamToolCallEvent {
     type: 'tool_call'
     toolCalls: ToolCall[]  // 驼峰式
-    displayMessages?: string[]  // 工具调用的展示文案数组
 }
 
 /**
@@ -70,7 +91,6 @@ export interface ToolCall {
     type: 'function'
     name: string
     arguments?: string
-    displayMessage?: string  // 展示文案
 }
 
 /**
@@ -78,7 +98,7 @@ export interface ToolCall {
  */
 export interface StreamTextEvent {
     type: 'text'
-    msg: string
+    content: string
 }
 
 /**
@@ -96,7 +116,7 @@ export interface StreamFinishEvent {
  */
 export interface StreamCompressionStartEvent {
     type: 'compression_start'
-    msg: string
+    content: string
 }
 
 /**
@@ -104,7 +124,7 @@ export interface StreamCompressionStartEvent {
  */
 export interface StreamCompressionErrorEvent {
     type: 'compression_error'
-    msg: string
+    content: string
 }
 
 /**

@@ -2,13 +2,13 @@
  * 智能文本分块服务
  *
  * 基于 Token 数量进行文本分块，保持语义连贯性：
- * - 使用 tiktoken 计算 Token 数
+ * - 使用 TokenizerService 计算 Token 数
  * - 优先在句子或段落边界处分块
  * - 支持分块重叠（避免信息丢失）
  */
 
-import { Logger } from "@nestjs/common";
-import * as tiktoken from "tiktoken";
+import { Injectable, Logger } from "@nestjs/common";
+import { TokenizerService } from "../../common/utils/tokenizer.service";
 
 /**
  * 页码文本条目
@@ -19,16 +19,13 @@ export interface PageEntry {
 }
 
 export interface ChunkResult {
-  content: string; // 包含重叠的完整内容（用于向量化）
-  cleanContent: string; // 纯净内容（不含重叠，用于展示）
+  content: string; // 分块文本内容（可能含前块末尾重叠，用于向量化）
   chunkIndex: number; // 分块索引
   metadata: {
     overlapLength: number; // 重叠部分的 Token 数
     chunkSize: number; // 原始内容长度（字符数）
     tokenCount: number; // Token 数量
-    cleanSize: number; // 纯净内容长度（字符数）
     strategy: string; // 分块策略
-    sourcePages?: number[]; // 来源页码列表（PDF 分块时记录）
   };
 }
 
@@ -42,80 +39,40 @@ export interface ChunkTextOptions extends ChunkingOptions {
   modelName?: string; // 可以覆盖构造函数中的模型名称
 }
 
+const DEFAULT_MODEL = "default";
+
+// 默认分块配置
+const DEFAULT_CHUNK_SIZE = 1000;
+const DEFAULT_OVERLAP_SIZE = 100;
+
+@Injectable()
 export class ChunkingService {
   private readonly logger = new Logger(ChunkingService.name);
-  private tokenizer: tiktoken.Tiktoken | null = null;
-  // 固定使用 cl100k_base 编码
-  private readonly encodingName: tiktoken.TiktokenEncoding =
-    "cl100k_base" as tiktoken.TiktokenEncoding;
 
-  constructor(private options: ChunkingOptions = {}) {
-    this.options = {
-      chunkSize: options.chunkSize || 1000,
-      overlapSize: options.overlapSize || 100,
-      modelName: options.modelName || "gpt-4o", // 保留但不再使用
-    };
-  }
-
-  /**
-   * 根据模型名称获取对应的 tiktoken 编码
-   */
-  private getEncodingForModel(modelName: string): tiktoken.TiktokenEncoding {
-    const model = modelName.toLowerCase();
-
-    // OpenAI 模型映射
-    if (model.includes("gpt-4o") || model.includes("gpt-4-turbo")) {
-      return "o200k_base" as tiktoken.TiktokenEncoding;
-    }
-    if (model.includes("gpt-4") || model.includes("gpt-3.5")) {
-      return "cl100k_base" as tiktoken.TiktokenEncoding;
-    }
-
-    // 默认使用 cl100k_base
-    return "cl100k_base" as tiktoken.TiktokenEncoding;
-  }
-
-  /**
-   * 获取或初始化 tokenizer（固定使用 cl100k_base 编码）
-   */
-  private async getTokenizer(): Promise<tiktoken.Tiktoken> {
-    if (!this.tokenizer) {
-      try {
-        this.tokenizer = await tiktoken.get_encoding(this.encodingName);
-        this.logger.debug("Tokenizer initialized with cl100k_base encoding");
-      } catch (error: any) {
-        this.logger.error(`Failed to initialize tokenizer: ${error.message}`);
-        throw error;
-      }
-    }
-    return this.tokenizer;
-  }
+  constructor(
+    private readonly tokenizerService: TokenizerService,
+  ) {}
 
   /**
    * 计算文本的 Token 数量
+   * 不走缓存——文档分块是批量一次性操作，几乎没有重复
    */
   async countTokens(text: string): Promise<number> {
-    const tokenizer = await this.getTokenizer();
-    return tokenizer.encode(text).length;
+    return this.tokenizerService.countTextTokens(DEFAULT_MODEL, text, false);
   }
 
   /**
    * 将文本编码为 Token ID 列表
    */
   async encodeText(text: string): Promise<number[]> {
-    const tokenizer = await this.getTokenizer();
-    const tokens = tokenizer.encode(text);
-    return Array.from(tokens);
+    return this.tokenizerService.encode(DEFAULT_MODEL, text);
   }
 
   /**
    * 将 Token ID 列表解码为文本
    */
   async decodeTokens(tokenIds: number[]): Promise<string> {
-    const tokenizer = await this.getTokenizer();
-    const uint32Array = new Uint32Array(tokenIds);
-    const decoded = tokenizer.decode(uint32Array);
-    return new TextDecoder().decode(decoded);
+    return this.tokenizerService.decode(DEFAULT_MODEL, tokenIds);
   }
 
   /**
@@ -138,7 +95,7 @@ export class ChunkingService {
 
   /**
    * 对分页文本进行基于 Token 的分块
-   * 按页边界优先分块，记录每个分块的来源页码
+   * 合并所有页面为连续文本后统一分块（不再按页边界切割）
    *
    * @param pages 页码文本列表
    * @param optionsOrMetadata 分块选项或元数据
@@ -172,77 +129,80 @@ export class ChunkingService {
     }
 
     const finalOptions: ChunkingOptions = {
-      chunkSize: chunkOptions.chunkSize ?? this.options.chunkSize,
-      overlapSize: chunkOptions.overlapSize ?? this.options.overlapSize,
-      modelName: this.options.modelName,
+      chunkSize: chunkOptions.chunkSize ?? DEFAULT_CHUNK_SIZE,
+      overlapSize: chunkOptions.overlapSize ?? DEFAULT_OVERLAP_SIZE,
     };
 
-    // 按页边界分块：每页独立分块，不跨页
-    const result: ChunkResult[] = [];
-    let globalChunkIndex = 0;
+    // 合并所有页面文本为连续文档（用换行分隔），不再按页边界单独分块
+    const combinedText = pages
+      .map((p) => p.text)
+      .filter((t) => t && t.trim().length > 0)
+      .join("\n");
 
-    for (const page of pages) {
-      if (!page.text || page.text.trim().length === 0) {
-        continue;
-      }
-
-      const processedText = this.preprocessText(page.text);
-      const pageChunks = await this.tokenBasedChunking(processedText, finalOptions);
-
-      let prevTokensList: number[] | null = null;
-
-      for (let idx = 0; idx < pageChunks.length; idx++) {
-        const content = pageChunks[idx];
-
-        const currentTokensList = await this.encodeText(content);
-        let tokenCount = currentTokensList.length;
-
-        let overlapLength = 0;
-        let cleanContent = content;
-        let finalContent = content;
-
-        // 处理重叠逻辑（仅在同一页内重叠，不跨页）
-        if (idx > 0 && this.options.overlapSize! > 0 && prevTokensList) {
-          const overlapTokenIds =
-            prevTokensList.length >= this.options.overlapSize!
-              ? prevTokensList.slice(-this.options.overlapSize!)
-              : prevTokensList;
-
-          const overlapText = await this.decodeTokens(overlapTokenIds);
-
-          if (content.startsWith(overlapText)) {
-            overlapLength = overlapTokenIds.length;
-            finalContent = content;
-          } else {
-            const fullEmbeddingContent = overlapText + content;
-            overlapLength = overlapTokenIds.length;
-            tokenCount = await this.countTokens(fullEmbeddingContent);
-            cleanContent = content;
-            finalContent = fullEmbeddingContent;
-          }
-        }
-
-        const chunk: ChunkResult = {
-          content: finalContent,
-          cleanContent: cleanContent,
-          chunkIndex: globalChunkIndex++,
-          metadata: {
-            ...(chunkMetadata || {}),
-            overlapLength,
-            chunkSize: cleanContent.length,
-            tokenCount,
-            cleanSize: cleanContent.length,
-            strategy: "token",
-            sourcePages: [page.pageNum],
-          },
-        };
-
-        result.push(chunk);
-        prevTokensList = await this.encodeText(finalContent);
-      }
+    if (!combinedText.trim()) {
+      return [];
     }
 
-    this.logger.log(`文本分块完成：共${result.length}个分块，策略=token`);
+    const processedText = this.preprocessText(combinedText);
+    const rawChunks = await this.tokenBasedChunking(processedText, finalOptions);
+
+    // 对连续文档统一应用重叠逻辑
+    const result: ChunkResult[] = [];
+    let prevTokensList: number[] | null = null;
+
+    for (let idx = 0; idx < rawChunks.length; idx++) {
+      const content = rawChunks[idx];
+      const currentTokensList = await this.encodeText(content);
+      let tokenCount = currentTokensList.length;
+      let overlapLength = 0;
+      let finalContent = content;
+
+      // 重叠逻辑（可跨前页面边界）
+      if (idx > 0 && finalOptions.overlapSize! > 0 && prevTokensList) {
+        const overlapTokenIds =
+          prevTokensList.length >= finalOptions.overlapSize!
+            ? prevTokensList.slice(-finalOptions.overlapSize!)
+            : prevTokensList;
+
+        const overlapText = await this.decodeTokens(overlapTokenIds);
+
+        // BPE tokenizer 可能将汉字切为多个 token，截取末尾 token 反解时
+        // 会产生不完整 UTF-8 序列 → TextDecoder 注入 U+FFFD（�）
+        // 此处清理替换字符，确保后续 startsWith 判断不受干扰
+        const cleanOverlapText = overlapText.replace(/\uFFFD/g, "");
+
+        if (content.startsWith(cleanOverlapText)) {
+          overlapLength = overlapTokenIds.length;
+          finalContent = content;
+        } else {
+          const fullEmbeddingContent = overlapText + content;
+          overlapLength = overlapTokenIds.length;
+          tokenCount = await this.countTokens(fullEmbeddingContent);
+          // 清理拼接处可能因 token 边界产生的替换字符
+          finalContent = fullEmbeddingContent.replace(/\uFFFD/g, "");
+        }
+      }
+
+      // 清理分块首尾：去除可能因预处理引入的前导空格/不可见字符
+      finalContent = finalContent.trimStart();
+
+      const chunk: ChunkResult = {
+        content: finalContent,
+        chunkIndex: idx,
+        metadata: {
+          ...(chunkMetadata || {}),
+          overlapLength,
+          chunkSize: finalContent.length,
+          tokenCount,
+          strategy: "token",
+        },
+      };
+
+      result.push(chunk);
+      prevTokensList = await this.encodeText(finalContent);
+    }
+
+    this.logger.log(`文本分块完成：共${result.length}个分块，跨页合并分块策略`);
     return result;
   }
 
@@ -348,11 +308,11 @@ export class ChunkingService {
     }
 
     // 步骤2: 删除控制字符（除空格、制表符、换行符外）
+    // 使用 Array.from 而非 split("")，避免拆散 UTF-16 代理对
     if (removeControlChars) {
-      processed = processed
-        .split("")
+      processed = Array.from(processed)
         .filter((char) => {
-          const code = char.charCodeAt(0);
+          const code = char.codePointAt(0) ?? 0;
           // 保留可打印字符和常见空白字符
           return (
             code >= 32 || // 空格及以上
@@ -378,16 +338,10 @@ export class ChunkingService {
       processed = processed.replace(/([!?.,;:])\1+/g, "$1");
     }
 
-    return processed;
-  }
+    // 步骤5: 清除因编码问题产生的替换字符（U+FFFD）
+    // 可能来源：PDF 自定义字体映射异常、tiktoken 不完整 token 反解
+    processed = processed.replace(/\uFFFD/g, "");
 
-  /**
-   * 释放 tokenizer 资源
-   */
-  dispose() {
-    if (this.tokenizer) {
-      this.tokenizer.free();
-      this.tokenizer = null;
-    }
+    return processed;
   }
 }

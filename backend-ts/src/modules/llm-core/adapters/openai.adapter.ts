@@ -1,14 +1,35 @@
 import { Logger } from "@nestjs/common";
 import { OpenAI, APIError } from "openai";
 import { IProtocolAdapter } from "./base.adapter";
-import { ProviderConfig, ConnectionTestResult } from "../types/provider.types";
+import { ProviderConfig, ConnectionTestResult, RemoteModel } from "../types/provider.types";
 import {
   MessageRecord,
-  InternalToolDefinition,
   LLMCompletionParams,
   LLMResponseChunk,
   ToolCallItem,
 } from "../types/llm.types";
+import { ToolDefinition } from "../../tools/interfaces/tool-provider.interface";
+
+/**
+ * 扩展 OpenAI 客户端，重写 makeStatusError 以保留完整 HTTP 响应体。
+ * OpenAI SDK 默认只保存 errJSON['error']，丢失了无 error 包裹的响应体。
+ */
+class BodyPreservingOpenAI extends OpenAI {
+  protected makeStatusError(
+    status: number | undefined,
+    error: Object | undefined,
+    message: string | undefined,
+    headers: any,
+  ): APIError {
+    const err = super.makeStatusError(status, error, message, headers);
+    // error 是完整的 errJSON（与 SDK 内部 APIError.generate 的第二个参数相同）
+    // 保存到 __rawBody 供 extractErrorDetail 提取
+    if (error) {
+      (err as any).__rawBody = typeof error === "object" ? JSON.stringify(error) : String(error);
+    }
+    return err;
+  }
+}
 
 export class OpenAIAdapter implements IProtocolAdapter {
   readonly protocol = "openai";
@@ -18,10 +39,19 @@ export class OpenAIAdapter implements IProtocolAdapter {
    * 创建 OpenAI API 客户端（可被子类覆盖）
    */
   protected createClient(config: ProviderConfig): OpenAI {
-    return new OpenAI({
+    const clientOptions: any = {
       baseURL: config.apiUrl,
       apiKey: config.apiKey,
-    });
+    };
+
+    // 支持自定义请求头
+    if (config.headers && Object.keys(config.headers).length > 0) {
+      clientOptions.defaultHeaders = {
+        ...config.headers,
+      };
+    }
+
+    return new BodyPreservingOpenAI(clientOptions);
   }
 
   /**
@@ -43,6 +73,25 @@ export class OpenAIAdapter implements IProtocolAdapter {
           : `连接失败: ${error.message}`,
         details: error,
       };
+    }
+  }
+
+  /**
+   * 从 OpenAI 兼容 API 同步模型列表
+   * 部分第三方服务可能不支持 /v1/models，此时返回空列表
+   */
+  async syncRemoteModels(config: ProviderConfig): Promise<RemoteModel[]> {
+    try {
+      const client = this.createClient(config);
+      const response = await client.models.list();
+      return response.data.map((model) => ({
+        id: model.id,
+        created: model.created,
+        owned_by: model.owned_by,
+      }));
+    } catch (error: any) {
+      this.logger.warn(`Failed to sync remote models (API may not support /v1/models): ${error.message}`);
+      return [];
     }
   }
 
@@ -93,6 +142,12 @@ export class OpenAIAdapter implements IProtocolAdapter {
     ) {
       // OpenAI 使用 reasoning_effort 参数
       requestParams.reasoning_effort = params.thinkingEffort;
+    }
+
+    // 流式模式下请求返回 usage 信息（OpenAI 标准要求显式声明）
+    // 多数供应商默认返回，但 OpenAI / Azure OpenAI 严格遵循此标准
+    if (params.stream) {
+      requestParams.stream_options = { include_usage: true };
     }
 
     return requestParams;
@@ -160,7 +215,7 @@ export class OpenAIAdapter implements IProtocolAdapter {
   /**
    * 将内部扁平化工具定义转换为 OpenAI 格式
    */
-  private convertTools(tools: InternalToolDefinition[]): any[] {
+  private convertTools(tools: ToolDefinition[]): any[] {
     return tools.map((tool) => ({
       type: "function",
       function: {
@@ -180,22 +235,28 @@ export class OpenAIAdapter implements IProtocolAdapter {
 
       const delta = choice.delta;
       const responseChunk: LLMResponseChunk = {
+        type: "text",
         content: delta?.content || null,
         reasoningContent: (delta as any)?.reasoning_content || null,
         finishReason: choice.finish_reason || null,
         toolCalls: undefined,
         usage: null,
       };
+      if ((delta as any)?.reasoning_content) responseChunk.type = "think";
+      if (choice.finish_reason) responseChunk.type = "finish";
 
       if ((chunk as any).usage) {
+        const rawUsage = (chunk as any).usage;
         responseChunk.usage = {
-          promptTokens: (chunk as any).usage.prompt_tokens,
-          completionTokens: (chunk as any).usage.completion_tokens,
-          totalTokens: (chunk as any).usage.total_tokens,
+          promptTokens: rawUsage.prompt_tokens,
+          completionTokens: rawUsage.completion_tokens,
+          totalTokens: rawUsage.total_tokens,
+          cachedTokens: extractOpenAICachedTokens(rawUsage),
         };
       }
 
       if (delta?.tool_calls) {
+        responseChunk.type = "tool_call";
         responseChunk.toolCalls = delta.tool_calls.map(
           (tc): ToolCallItem => ({
             id: tc.id,
@@ -225,7 +286,10 @@ export class OpenAIAdapter implements IProtocolAdapter {
       throw new Error("Invalid response from LLM API");
 
     const message = choice.message;
+    const hasToolCalls = !!message.tool_calls;
+    const hasReasoning = !!(message as any).reasoning_content;
     const result: LLMResponseChunk = {
+      type: hasToolCalls ? "tool_call" : hasReasoning ? "think" : "finish",
       content: message.content || null,
       reasoningContent: (message as any).reasoning_content || null,
       finishReason: choice.finish_reason || null,
@@ -238,6 +302,7 @@ export class OpenAIAdapter implements IProtocolAdapter {
         promptTokens: response.usage.prompt_tokens,
         completionTokens: response.usage.completion_tokens,
         totalTokens: response.usage.total_tokens,
+        cachedTokens: extractOpenAICachedTokens(response.usage),
       };
     }
 
@@ -270,7 +335,28 @@ export class OpenAIAdapter implements IProtocolAdapter {
       `LLM API error (${isStream ? "stream" : "non-stream"}): ${errorDetail}`,
     );
 
+    // 额外输出完整错误对象的所有自有属性（部分供应商返回非标准格式，如 body 不在标准字段中）
+    try {
+      const extraFields: Record<string, any> = {};
+      for (const key of Object.getOwnPropertyNames(error)) {
+        if (!["stack", "message", "name", "status", "code", "type"].includes(key)) {
+          const val = error[key];
+          if (val !== undefined && val !== null) {
+            extraFields[key] = typeof val === "object" ? val : String(val);
+          }
+        }
+      }
+      if (Object.keys(extraFields).length > 0) {
+        this.logger.error(`LLM API error extra: ${JSON.stringify(extraFields).substring(0, 2000)}`);
+      }
+    } catch { /* ignore serialization errors */ }
+
     if (error instanceof APIError) {
+      const rawBody = (error as any).__rawBody;
+      // 如果 SDK 显示 "(no body)" 但实际有 body，替换消息
+      if (rawBody && error.message?.includes("(no body)")) {
+        throw new Error(`LLM API Error: ${error.status} - body=${rawBody.substring(0, 500)}`);
+      }
       throw new Error(`LLM API Error: ${error.status} - ${error.message}`);
     }
     if (error.name === "AbortError") throw new Error("LLM request aborted");
@@ -292,6 +378,16 @@ export class OpenAIAdapter implements IProtocolAdapter {
     if (error.type) parts.push(`type=${error.type}`);
     if (error.message) parts.push(`message=${error.message}`);
     if (error.name && error.name !== "Error") parts.push(`name=${error.name}`);
+
+    // 提取原始 HTTP 响应体（通过 BodyPreservingOpenAI.makeStatusError 注入）
+    if ((error as any).__rawBody) {
+      parts.push(`body=${(error as any).__rawBody}`);
+    }
+
+    // 提取 request_id（OpenAI SDK 的标准字段）
+    if (error.request_id) {
+      parts.push(`request_id=${error.request_id}`);
+    }
 
     // 尝试提取 stack，防止序列化失败
     if (error.stack) {
@@ -333,4 +429,33 @@ export class OpenAIAdapter implements IProtocolAdapter {
       }
     }
   }
+}
+
+/**
+ * 从 OpenAI 协议 usage 对象中提取缓存 token 字段
+ * 兼容两种格式：
+ * - OpenAI 官方: usage.prompt_tokens_details.cached_tokens
+ * - DeepSeek 风格: usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
+ */
+function extractOpenAICachedTokens(rawUsage: any): { read?: number; missed?: number } | undefined {
+  const cachedTokens: { read?: number; missed?: number } = {};
+
+  // DeepSeek 风格: usage.prompt_cache_hit_tokens (flat in usage)
+  // 优先使用此格式，若存在则不再检查 prompt_tokens_details
+  if (rawUsage.prompt_cache_hit_tokens != null) {
+    cachedTokens.read = Number(rawUsage.prompt_cache_hit_tokens);
+    if (rawUsage.prompt_cache_miss_tokens != null) {
+      cachedTokens.missed = Number(rawUsage.prompt_cache_miss_tokens);
+    }
+  } else {
+    // OpenAI 官方格式: usage.prompt_tokens_details.cached_tokens
+    const details = rawUsage.prompt_tokens_details;
+    if (details?.cached_tokens != null) {
+      cachedTokens.read = Number(details.cached_tokens);
+    }
+  }
+
+  return cachedTokens.read !== undefined || cachedTokens.missed !== undefined
+    ? cachedTokens
+    : undefined;
 }

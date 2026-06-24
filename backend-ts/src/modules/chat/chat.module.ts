@@ -1,9 +1,8 @@
 import { Module, OnModuleInit } from "@nestjs/common";
 
 import { AgentEngine } from "./agent-engine.service";
-import { SessionContextService } from "./session-context.service";
+import { SessionContextFactory } from "./session-context.factory";
 import { ToolOrchestrator } from "../tools/tool-orchestrator.service";
-import { TokenizerService } from "../../common/utils/tokenizer.service";
 import { ChatController } from "./chat.controller";
 import { MessagesController } from "./messages.controller";
 import { SessionGroupController } from "./session-group.controller";
@@ -26,20 +25,20 @@ import { UploadPathService } from "../../common/services/upload-path.service";
 import { FileWatcherService } from "../../common/services/file-watcher.service";
 import { ChatRunnerService } from "./chat-runner.service";
 import { ToolCallDisplayUtil } from "./utils/tool-call-display.util";
+import { EventBusService } from "../../common/events/event-bus.service";
 
 import { MessageStoreService } from "./message-store.service";
 import { CompressionEngine } from "./compression-engine";
-import { ConversationContextFactory, MESSAGE_STORE_TOKEN, COMPRESSION_STRATEGY_TOKEN } from "./conversation-context.factory";
+import { MESSAGE_STORE_TOKEN, COMPRESSION_STRATEGY_TOKEN } from "./interfaces";
 
 @Module({
   imports: [AuthModule, ToolsModule, CharactersModule, FilesModule, LlmCoreModule, SkillsModule],
   controllers: [ChatController, MessagesController, SessionsController, SessionGroupController, WorkspaceEventsController, SessionEventsController],
   providers: [
     AgentEngine,
-    SessionContextService,
+    SessionContextFactory,
     MessageStoreService,
     CompressionEngine,
-    ConversationContextFactory,
     { provide: MESSAGE_STORE_TOKEN, useExisting: MessageStoreService },
     { provide: COMPRESSION_STRATEGY_TOKEN, useExisting: CompressionEngine },
     MessageService,
@@ -47,14 +46,13 @@ import { ConversationContextFactory, MESSAGE_STORE_TOKEN, COMPRESSION_STRATEGY_T
     SessionGroupService,
 
     SessionStreamManager,
-    TokenizerService,
     UploadPathService,
     FileWatcherService,
     SessionEventsService,
     ChatRunnerService,
     ToolCallDisplayUtil,
   ],
-  exports: [AgentEngine, SessionService, MessageService, SessionEventsService, ChatRunnerService],
+  exports: [AgentEngine, SessionService, MessageService, SessionEventsService, ChatRunnerService, SessionContextFactory],
 })
 export class ChatModule implements OnModuleInit {
   constructor(

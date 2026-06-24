@@ -1,7 +1,58 @@
 <template>
-  <el-dialog :model-value="visible" @update:model-value="$emit('update:visible', $event)" title="会话记忆与压缩配置" width="600px" max-width="80vw" append-to-body
+  <el-dialog :model-value="visible" @update:model-value="$emit('update:visible', $event)" title="会话配置" width="600px" max-width="80vw" append-to-body
     :close-on-click-modal="false" class="session-settings-dialog">
     <el-form label-position="left" label-width="50%" size="large">
+      <!-- 模型参数覆盖 -->
+      <el-form-item>
+        <template #label>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <span class="text-base text-gray-900 dark:text-gray-100 font-medium">覆盖模型参数</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">将覆盖模型本身的默认参数。除非你明确知道自己在干什么，否则保持默认关闭</span>
+          </div>
+        </template>
+        <div class="w-full max-w-md">
+          <el-switch v-model="tempConfig.modelOverrideEnabled" inline-prompt active-text="开启" inactive-text="关闭" />
+        </div>
+      </el-form-item>
+
+      <template v-if="tempConfig.modelOverrideEnabled">
+        <!-- 温度 -->
+        <el-form-item>
+          <template #label>
+            <div class="flex flex-col gap-1">
+              <span class="text-base text-gray-900 dark:text-gray-100 font-medium">温度</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">控制输出的随机性和创造性，值越高越富有创意</span>
+            </div>
+          </template>
+          <el-slider-optional v-model="tempConfig.modelTemperature" :min="0" :max="1.9" :step="0.1"
+            show-input optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
+        </el-form-item>
+        <!-- Top P -->
+        <el-form-item>
+          <template #label>
+            <div class="flex flex-col gap-1">
+              <span class="text-base text-gray-900 dark:text-gray-100 font-medium">Top P</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">核采样参数，控制输出词汇的多样性范围</span>
+            </div>
+          </template>
+          <el-slider-optional v-model="tempConfig.modelTopP" :min="0" :max="1" :step="0.1" show-input
+            optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
+        </el-form-item>
+        <!-- 频率惩罚 -->
+        <el-form-item>
+          <template #label>
+            <div class="flex flex-col gap-1">
+              <span class="text-base text-gray-900 dark:text-gray-100 font-medium">频率惩罚</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">降低重复内容的出现概率，正值减少重复，负值鼓励重复</span>
+            </div>
+          </template>
+          <el-slider-optional v-model="tempConfig.modelFrequencyPenalty" :min="-1.9" :max="1.9" :step="0.1"
+            show-input optional-direction="max" optional-text="Auto" class="w-full max-w-md" />
+        </el-form-item>
+      </template>
+
+      <el-divider />
+
       <!-- 自定义配置开关 -->
       <el-form-item>
         <template #label>
@@ -79,7 +130,7 @@
           <template #label>
             <div class="flex flex-col gap-1">
               <span class="text-base text-gray-900 dark:text-gray-100 font-medium">摘要模式</span>
-              <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">选择摘要生成方式：关闭、快速或迭代优化</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">选择摘要生成方式：关闭、快速或记忆同步</span>
             </div>
           </template>
           <div class="w-full max-w-md">
@@ -100,12 +151,12 @@
                   <span>快速摘要 - 单次调用生成</span>
                 </span>
               </el-option>
-              <el-option label="迭代摘要" value="iterative">
+              <el-option label="记忆同步" value="memory_sync">
                 <span class="flex items-center gap-2">
                   <el-icon>
                     <SyncOutlined />
                   </el-icon>
-                  <span>迭代摘要 - 多轮优化，质量最高</span>
+                  <span>记忆同步 - 压缩前自动保存重要记忆到文件</span>
                 </span>
               </el-option>
             </el-select>
@@ -115,7 +166,7 @@
         <el-alert title="提示" type="info" :closable="false" show-icon class="mb-6">
           <p class="text-sm">• 触发阈值：控制何时启动压缩（建议 70%-85%）</p>
           <p class="text-sm">• 保留目标：控制压缩后的 Token 占用（建议 40%-60%）</p>
-          <p class="text-sm">• 摘要模式：关闭仅裁剪工具结果，快速适合日常使用，迭代质量最高但耗时较长</p>
+          <p class="text-sm">• 摘要模式：关闭仅裁剪工具结果，快速适合日常使用，记忆同步自动保存重要记忆到文件</p>
         </el-alert>
       </template>
     </el-form>
@@ -129,6 +180,7 @@
 </template>
 
 <script setup lang="ts">
+import { DEFAULT_SUMMARY_MODE } from '@/constants'
 import { reactive, ref, watch } from 'vue'
 import { ElDialog, ElForm, ElFormItem, ElSwitch, ElInput, ElSlider, ElSelect, ElOption, ElAlert, ElButton, ElIcon, ElTooltip } from 'element-plus'
 import ElSliderOptional from '../../ui/ElSliderOptional.vue'
@@ -136,6 +188,12 @@ import { CloseOutlined, HelpOutlined } from '@vicons/material'
 import { ThunderboltOutlined, SyncOutlined } from '@vicons/antd'
 
 interface MemoryConfig {
+  modelOverrideEnabled?: boolean
+  model?: {
+    temperature?: number | null
+    topP?: number | null
+    frequencyPenalty?: number | null
+  }
   useCustom?: boolean
   maxMemoryLength?: number | null
   compressionTriggerRatio?: number
@@ -157,8 +215,12 @@ const emit = defineEmits<{
 
 // 临时配置（内部使用的简化版本）
 interface TempConfig {
+  modelOverrideEnabled: boolean
+  modelTemperature: number | undefined
+  modelTopP: number | undefined
+  modelFrequencyPenalty: number | undefined
   useCustom: boolean
-  maxMemoryLength: number | null
+  maxMemoryLength: number | undefined
   triggerRatio: number
   targetRatio: number
   summaryMode: string
@@ -166,11 +228,15 @@ interface TempConfig {
 }
 
 const tempConfig = reactive<TempConfig>({
+  modelOverrideEnabled: false,
+  modelTemperature: undefined,
+  modelTopP: undefined,
+  modelFrequencyPenalty: undefined,
   useCustom: true,
-  maxMemoryLength: null,
+  maxMemoryLength: undefined,
   triggerRatio: 0.8,
   targetRatio: 0.5,
-  summaryMode: 'fast',
+  summaryMode: DEFAULT_SUMMARY_MODE,
   maxTokensLimit: null,
 })
 
@@ -255,12 +321,16 @@ function formatSliderTooltip(val: number): string {
  */
 function initTempConfig() {
   const settings = props.config || {}
-  
+
+  tempConfig.modelOverrideEnabled = settings.modelOverrideEnabled ?? false
+  tempConfig.modelTemperature = settings.model?.temperature ?? undefined
+  tempConfig.modelTopP = settings.model?.topP ?? undefined
+  tempConfig.modelFrequencyPenalty = settings.model?.frequencyPenalty ?? undefined
   tempConfig.useCustom = settings.useCustom ?? true
-  tempConfig.maxMemoryLength = settings.maxMemoryLength ?? null
+  tempConfig.maxMemoryLength = settings.maxMemoryLength ?? undefined
   tempConfig.triggerRatio = settings.compressionTriggerRatio ?? 0.8
   tempConfig.targetRatio = settings.compressionTargetRatio ?? 0.5
-  tempConfig.summaryMode = settings.summaryMode ?? 'fast'
+  tempConfig.summaryMode = settings.summaryMode ?? DEFAULT_SUMMARY_MODE
   tempConfig.maxTokensLimit = settings.maxTokensLimit || null
   
   // 同步更新显示值
@@ -275,7 +345,19 @@ function handleConfirm() {
     memoryEnabled: tempConfig.useCustom,
   }
 
-  // 只有当开启自定义配置时，才保存具体的数值
+  // 模型参数覆盖
+  configChanges.modelOverrideEnabled = tempConfig.modelOverrideEnabled
+  if (tempConfig.modelOverrideEnabled) {
+    configChanges.model = {
+      temperature: tempConfig.modelTemperature ?? null,
+      topP: tempConfig.modelTopP ?? null,
+      frequencyPenalty: tempConfig.modelFrequencyPenalty ?? null,
+    }
+  } else {
+    configChanges.model = null
+  }
+
+  // 只有当记忆开启自定义配置时，才保存具体的数值
   if (tempConfig.useCustom) {
     configChanges.memory = {
       maxMemoryLength: tempConfig.maxMemoryLength,

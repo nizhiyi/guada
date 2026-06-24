@@ -351,6 +351,45 @@ class ApiService {
     });
   }
 
+  // ========== 团队相关 ==========
+  async fetchTeams(): Promise<any[]> {
+    return await this._request("/teams");
+  }
+
+  async fetchTeam(teamId: string): Promise<any> {
+    return await this._request(`/teams/${teamId}`);
+  }
+
+  async createTeam(data: {
+    name: string;
+    description?: string;
+    leaderCharacterId: string;
+    memberCharacterIds?: string[];
+  }): Promise<any> {
+    return await this._request("/teams", { method: "POST", data });
+  }
+
+  async updateTeam(
+    teamId: string,
+    data: {
+      name?: string;
+      description?: string;
+      leaderCharacterId?: string;
+      memberCharacterIds?: string[];
+    },
+  ): Promise<any> {
+    return await this._request(`/teams/${teamId}`, {
+      method: "PUT",
+      data,
+    });
+  }
+
+  async deleteTeam(teamId: string): Promise<{ success: boolean }> {
+    return await this._request(`/teams/${teamId}`, {
+      method: "DELETE",
+    });
+  }
+
   // ========== 会话相关 ==========
   async createSession(data: any): Promise<Session> {
     return await this._request("/sessions", { method: "POST", data });
@@ -595,10 +634,12 @@ class ApiService {
 
   /**
    * 获取工作目录中原始文件的访问 URL（用于图片等资源）
+   * 携带 token query 参数以支持 <img> 标签直出
    */
   getWorkspaceRawFileUrl(sessionId: string, filePath: string): string {
     const baseUrl = this.baseURL.replace(/\/$/, '');
-    return `${baseUrl}/sessions/${sessionId}/workspace/raw-file?path=${encodeURIComponent(filePath)}`;
+    const token = sessionStorage.getItem("token") || localStorage.getItem("token") || '';
+    return `${baseUrl}/sessions/${sessionId}/workspace/raw-file?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
   }
 
   /**
@@ -611,6 +652,33 @@ class ApiService {
     return await this._request(`/sessions/${sessionId}/workspace-path`, {
       method: "PUT",
       data: { workspacePath },
+    });
+  }
+
+  /**
+   * 删除工作目录中的文件/目录
+   */
+  async deleteWorkspaceFile(
+    sessionId: string,
+    filePath: string,
+  ): Promise<{ success: boolean; isDirectory?: boolean }> {
+    return await this._request(
+      `/sessions/${sessionId}/workspace/file?path=${encodeURIComponent(filePath)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /**
+   * 重命名工作目录中的文件/目录
+   */
+  async renameWorkspaceFile(
+    sessionId: string,
+    filePath: string,
+    newName: string,
+  ): Promise<{ success: boolean; isDirectory?: boolean; newPath?: string }> {
+    return await this._request(`/sessions/${sessionId}/workspace/rename`, {
+      method: "POST",
+      data: { path: filePath, newName },
     });
   }
 
@@ -939,16 +1007,16 @@ class ApiService {
   }
 
   async fetchGlobalTools(): Promise<any> {
-    return await this._request("/settings/tools/global");
+    return await this._request("/settings/plugins/global");
   }
 
   async updateGlobalToolStatus(
-    namespace: string,
+    pluginId: string,
     enabled: boolean,
   ): Promise<{ success: boolean }> {
-    return await this._request("/settings/tools/global", {
+    return await this._request("/settings/plugins/global", {
       method: "PUT",
-      data: { namespace, enabled },
+      data: { pluginId, enabled },
     });
   }
 
@@ -1088,6 +1156,19 @@ class ApiService {
   }
 
   /**
+   * 从 URL 安装 Skill（服务端下载 ZIP）
+   */
+  async installSkillFromUrl(
+    url: string,
+    force: boolean = false,
+  ): Promise<{ success: boolean; skillId?: string; message: string }> {
+    return await this._request("/skills/install-from-url", {
+      method: "POST",
+      data: { url, force },
+    });
+  }
+
+  /**
    * 卸载 Skill
    */
   async uninstallSkill(
@@ -1096,6 +1177,45 @@ class ApiService {
     return await this._request(`/skills/${skillId}/uninstall`, {
       method: "POST",
     });
+  }
+
+  /**
+   * 启用 Skill
+   */
+  async enableSkill(
+    skillId: string,
+  ): Promise<{ success: boolean; message: string }> {
+    return await this._request(`/skills/${skillId}/enable`, {
+      method: "POST",
+    });
+  }
+
+  /**
+   * 禁用 Skill
+   */
+  async disableSkill(
+    skillId: string,
+  ): Promise<{ success: boolean; message: string }> {
+    return await this._request(`/skills/${skillId}/disable`, {
+      method: "POST",
+    });
+  }
+
+  /**
+   * 批量启用/禁用 Skills
+   */
+  async batchToggleSkills(ids: string[], enabled: boolean): Promise<{ success: boolean; message: string }> {
+    return await this._request("/skills/batch-toggle", {
+      method: "POST",
+      data: { ids, enabled },
+    });
+  }
+
+  /**
+   * 获取所有技能的启用状态
+   */
+  async fetchSkillsEnabledStatus(): Promise<Array<{ id: string; enabled: boolean }>> {
+    return await this._request("/skills/enabled-status");
   }
 
   // ========== 知识库管理 ==========
