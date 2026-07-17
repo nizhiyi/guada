@@ -1,13 +1,12 @@
 <template>
-    <div class="workspace-sidebar h-full flex flex-col border-l border-gray-200 dark:border-[#2e3035]">
+    <div class="workspace-sidebar h-full flex flex-col">
         <!-- 目录树（预览时隐藏，v-show 保留 DOM） -->
         <div v-show="!selectedFile" class="h-full flex flex-col flex-1 min-h-0">
             <!-- 浏览器窗口列表（仅 Electron 环境，置于最上方确保可见） -->
             <SessionBrowserWindowList v-if="isElectron" :session-id="props.sessionId" />
             <div class="border-b border-gray-100 dark:border-[#2e3035] mx-4 mt-3"></div>
             <!-- 头部 -->
-            <div
-                class="shrink-0 flex items-center justify-between px-2 py-3 ">
+            <div class="shrink-0 flex items-center justify-between px-2 py-3 ">
                 <h3 class="text-sm font-normal text-gray-500 dark:text-[#8b8d95] whitespace-nowrap mx-2">
                     工作目录</h3>
                 <div class="flex items-center gap-0 shrink-0">
@@ -24,6 +23,14 @@
                         <el-button class="workspace-tool-btn" text @click="openInFileManager">
                             <el-icon size="16">
                                 <FolderOpened />
+                            </el-icon>
+                        </el-button>
+                    </el-tooltip>
+                    <!-- 以 VSCode 打开工作目录（仅 Electron 环境） -->
+                    <el-tooltip v-if="isElectron" content="以 VSCode 打开工作目录" placement="bottom">
+                        <el-button class="workspace-tool-btn" text @click="openWorkspaceInVSCode">
+                            <el-icon size="16">
+                                <VsCode />
                             </el-icon>
                         </el-button>
                     </el-tooltip>
@@ -44,16 +51,9 @@
                     暂无文件，请先设置工作目录
                 </div>
 
-                <WorkspaceTree
-                    v-else
-                    :nodes="treeData"
-                    :selected-path="selectedNodePath"
-                    :loading-paths="loadingPaths"
-                    :on-load="(node) => handleTreeNodeToggle(node, true)"
-                    @select="handleTreeNodeSelect"
-                    @toggle="handleTreeNodeExpandToggle"
-                    @contextmenu="handleContextMenu"
-                />
+                <WorkspaceTree v-else :nodes="treeData" :selected-path="selectedNodePath" :loading-paths="loadingPaths"
+                    :on-load="(node) => handleTreeNodeToggle(node, true)" @select="handleTreeNodeSelect"
+                    @toggle="handleTreeNodeExpandToggle" @contextmenu="handleContextMenu" />
             </div>
         </div>
 
@@ -61,26 +61,39 @@
         <div v-show="selectedFile" class="flex flex-col h-full w-full  flex-1">
             <!-- 标题栏 -->
             <div
-                class="shrink-0 flex items-center justify-between px-2 py-1.5 bg-gray-50 dark:bg-[#2a2c30] border-b border-gray-200 dark:border-[#2e3035]">
-                <span class="text-xs font-medium text-gray-600 dark:text-[#8b8d95] truncate">
-                    {{ selectedFile?.name }}
-                </span>
+                class="shrink-0 flex items-center justify-between px-4 py-2 border-b border-gray-100 dark:border-[#2e3035]">
+                <div class="flex items-center gap-2 min-w-0">
+                    <!-- 预览/源码切换按钮（仅 md 和 html），放在左侧高频操作区 -->
+                    <div v-if="canTogglePreview"
+                        class="flex items-center gap-0.5 bg-gray-100/80 dark:bg-[#242529] rounded-md p-0.5 shrink-0">
+                        <button class="preview-mode-btn" :class="{ 'is-active': currentPreviewMode === 'rendered' }"
+                            title="预览" @click="currentPreviewMode = 'rendered'">
+                            <el-icon :size="16">
+                                <Eye20Regular v-if="currentPreviewMode !== 'rendered'" />
+                                <Eye20Filled v-else />
+                            </el-icon>
+                        </button>
+                        <button class="preview-mode-btn" :class="{ 'is-active': currentPreviewMode === 'source' }"
+                            title="源码" @click="currentPreviewMode = 'source'">
+                            <el-icon :size="16">
+                                <Code20Regular v-if="currentPreviewMode !== 'source'" />
+                                <Code20Filled v-else />
+                            </el-icon>
+                        </button>
+                    </div>
 
-                <div class="flex items-center gap-2">
-                    <!-- 预览/源码切换按钮（仅 md 和 html） -->
-                    <el-button-group v-if="canTogglePreview">
-                        <el-button size="small" :type="currentPreviewMode === 'rendered' ? 'primary' : ''"
-                            @click="currentPreviewMode = 'rendered'">
-                            预览
-                        </el-button>
-                        <el-button size="small" :type="currentPreviewMode === 'source' ? 'primary' : ''"
-                            @click="currentPreviewMode = 'source'">
-                            源码
-                        </el-button>
-                    </el-button-group>
+                    <span class="font-medium text-gray-600 dark:text-[#8b8d95] truncate ml-2">
+                        {{ selectedFile?.name }}
+                    </span>
+                </div>
 
+                <div class="flex items-center gap-1 shrink-0">
                     <!-- 返回目录树按钮 -->
-                    <el-button :icon="Close" circle size="small" @click="closePreview" />
+                    <button class="preview-close-btn" title="关闭预览" @click="closePreview">
+                        <el-icon :size="16">
+                            <Dismiss20Regular />
+                        </el-icon>
+                    </button>
                 </div>
             </div>
 
@@ -92,11 +105,8 @@
                 </div>
 
                 <!-- 图片预览 -->
-                <img v-else-if="previewMode === 'image' && !previewError"
-                    :src="imagePreviewUrl"
-                    @error="onImageError"
-                    class="image-preview w-full h-full object-contain p-2"
-                    alt="图片预览" />
+                <img v-else-if="previewMode === 'image' && !previewError" :src="imagePreviewUrl" @error="onImageError"
+                    class="image-preview w-full h-full object-contain p-2" alt="图片预览" />
 
                 <!-- 不支持的文件 -->
                 <div v-else-if="previewMode === 'unsupported' && !previewError"
@@ -111,27 +121,26 @@
 
                 <!-- 错误 / 文本内容 -->
                 <div v-else class="w-full min-h-0">
-                    <div v-if="previewError"
-                        class="w-full h-full flex items-center justify-center p-4">
+                    <div v-if="previewError" class="w-full h-full flex items-center justify-center p-4">
                         <div class="text-center">
                             <p class="text-gray-400 dark:text-gray-500 text-sm">{{ previewError }}</p>
-                            <el-button v-if="isElectron && previewMode === 'unsupported'" @click="handleOpenInExplorerForCurrent" size="small" class="mt-3">
+                            <el-button v-if="isElectron && previewMode === 'unsupported'"
+                                @click="handleOpenInExplorerForCurrent" size="small" class="mt-3">
                                 在资源管理器中打开
                             </el-button>
                         </div>
                     </div>
                     <template v-else-if="previewMode === 'text'">
-                        <!-- HTML 预览模式 -->
-                        <iframe v-if="isHtmlFile && currentPreviewMode === 'rendered'" :srcdoc="fileContent"
-                            class="w-full border-0" style="height: 100%;"
-                            sandbox="allow-same-origin allow-scripts" />
+                        <!-- HTML 预览模式（通过 src 直接加载，后端 Set-Cookie 鉴权） -->
+                        <iframe v-if="isHtmlFile && currentPreviewMode === 'rendered'" :src="htmlPreviewUrl"
+                            class="w-full border-0" style="height: 100%;" sandbox="allow-same-origin allow-scripts" />
 
                         <!-- Markdown 渲染模式 -->
                         <div v-else-if="isMarkdownFile && currentPreviewMode === 'rendered'"
-                            class="markdown-preview markdown-text" v-html="renderedContent" />
+                            class="markdown-preview markdown-text" v-html="markdownHtml" />
 
-                        <!-- 源码模式（带语法高亮）- 所有支持的文件类型 -->
-                        <div v-else-if="renderedContent" class="code-preview-container" v-html="renderedContent" />
+                        <!-- 源码高亮（所有文件的 source 模式 + 不支持预览的文本文件） -->
+                        <div v-else-if="highlightedCode" class="code-preview-container" v-html="highlightedCode" />
 
                         <!-- 普通文本预览（不支持高亮的文件） -->
                         <pre v-else v-text="fileContent"
@@ -146,21 +155,19 @@
     <WorkspaceSettingsDialog v-model:visible="workspaceDialogVisible" :current-workspace-path="currentWorkspacePath"
         :allow-empty="false" @confirm="handleWorkspaceChange" />
 
-    <ContextMenu
-        :visible="contextMenu.visible"
-        :x="contextMenu.x"
-        :y="contextMenu.y"
-        :items="contextMenuItems"
-        @close="closeContextMenu"
-    />
+    <ContextMenu :visible="contextMenu.visible" :x="contextMenu.x" :y="contextMenu.y" :items="contextMenuItems"
+        @close="closeContextMenu" />
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiService, type FileChangeEvent } from '@/services/ApiService';
-import { Refresh, Close, FolderOpened, Switch, CopyDocument, Edit, Delete } from '@element-plus/icons-vue';
+import { Refresh, FolderOpened, Switch, CopyDocument, Edit, Delete } from '@element-plus/icons-vue';
 import { LoadingOutlined } from '@vicons/antd';
+import { Dismiss20Regular, Eye20Filled, Eye20Regular, Code20Filled, Code20Regular } from '@vicons/fluent';
+// @ts-ignore - icons 组件尚未迁移到 TypeScript
+import { VsCode } from '@/components/icons';
 import { useStorage, useThrottleFn } from '@vueuse/core';
 import { useMarkdown } from '@/composables/useMarkdown';
 import { useHighlight } from '@/composables/useHighlight';
@@ -185,6 +192,11 @@ const props = defineProps<{
     sessionId: string | null;
 }>();
 
+const emit = defineEmits<{
+    'preview-open': [];
+    'preview-close': [];
+}>();
+
 const treeData = ref<WorkspaceNode[]>([]);
 const isLoading = ref(false);
 const selectedFile = ref<SelectedFile | null>(null);
@@ -199,6 +211,8 @@ const selectedNodePath = ref('');
 const previewMode = ref<'text' | 'image' | 'unsupported' | null>(null);
 // 图片预览 URL（Electron 为 file:// 协议，非 Electron 为 rawfile URL）
 const imagePreviewUrl = ref('');
+// HTML 预览 URL（iframe src，Electron 为 file://，非 Electron 为 html-preview 端点）
+const htmlPreviewUrl = ref('');
 
 // 正在加载子节点的目录路径集合
 const loadingPaths = ref<Set<string>>(new Set());
@@ -230,6 +244,12 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             label: '在资源管理器中打开',
             icon: FolderOpened,
             onClick: handleOpenInExplorer,
+        });
+        // 文件/目录支持以 VSCode 打开
+        items.push({
+            label: '以 VSCode 打开',
+            icon: VsCode,
+            onClick: handleOpenInVSCode,
         });
     }
     items.push({
@@ -383,51 +403,20 @@ const canTogglePreview = computed(() => {
     return isMarkdownFile.value || isHtmlFile.value;
 });
 
-// 渲染后的内容（用于 Markdown 预览和源码高亮）
-const renderedContent = computed(() => {
+// Markdown 渲染（仅负责渲染，不判断文件类型和模式）
+const markdownHtml = computed(() => {
     if (!selectedFile.value || !fileContent.value) return '';
+    return parseMarkdown(fileContent.value);
+});
 
-    const ext = selectedFile.value.extension.toLowerCase();
-
-    // Markdown 预览模式
-    if ((ext === '.md' || ext === '.markdown') && currentPreviewMode.value === 'rendered') {
-        return parseMarkdown(fileContent.value);
-    }
-
-    // HTML 预览模式 - iframe 单独处理，这里返回空
-    if ((ext === '.html' || ext === '.htm') && currentPreviewMode.value === 'rendered') {
-        return '';
-    }
-
-    // 源码模式 - 所有支持高亮的文件
-    if (currentPreviewMode.value === 'source') {
-        const lang = getLanguageFromExtension(ext);
-        if (lang) {
-            return highlightCode(fileContent.value, lang);
-        }
-        // 如果没有匹配的语言，返回空，使用普通文本预览
-        return '';
-    }
-
-    // 预览模式下，如果是支持高亮的代码文件，也显示高亮
-    const lang = getLanguageFromExtension(ext);
-    if (lang && currentPreviewMode.value === 'rendered') {
-        return highlightCode(fileContent.value, lang);
-    }
-
+// 源码高亮（仅负责渲染，不判断文件类型和模式）
+const highlightedCode = computed(() => {
+    if (!selectedFile.value || !fileContent.value) return '';
+    const lang = getLanguageFromExtension(selectedFile.value.extension.toLowerCase());
+    if (lang) return highlightCode(fileContent.value, lang);
     return '';
 });
 
-/**
- * 检查节点是否在树中
- */
-function isNodeInTree(nodes: WorkspaceNode[], path: string): boolean {
-    for (const node of nodes) {
-        if (node.path === path) return true;
-        if (node.children && isNodeInTree(node.children, path)) return true;
-    }
-    return false;
-}
 
 /**
  * 增量更新树数据，保留已加载的子节点和展开状态
@@ -500,8 +489,6 @@ async function loadTree(force = false) {
     }
 }
 
-// 创建节流版本的 loadTree（5秒内最多执行一次）
-const throttledLoadTree = useThrottleFn(loadTree, 5000);
 
 /**
  * 刷新树（强制立即执行）
@@ -744,7 +731,7 @@ async function handleCopyFilePath() {
 }
 
 /**
- * 在资源管理器中打开
+ * 在资源管理器中打开（文件会选中，目录直接打开）
  */
 async function handleOpenInExplorer() {
     const node = contextMenu.value.node;
@@ -763,22 +750,47 @@ async function handleOpenInExplorer() {
         // 拼接完整绝对路径
         const relativePath = node.path.replace(/\\/g, '/');
         const separator = workspacePath.endsWith('/') || workspacePath.endsWith('\\') || relativePath.startsWith('/') ? '' : '/';
-        let fullPath = workspacePath + separator + relativePath;
+        const fullPath = workspacePath + separator + relativePath;
 
-        // 如果是文件，获取其父目录路径
-        if (!node.isDirectory) {
-            const lastSepIndex = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));
-            if (lastSepIndex > 0) {
-                fullPath = fullPath.substring(0, lastSepIndex);
-            }
-        }
-
-        if (window.electronAPI) {
-            await window.electronAPI.openFolder(fullPath);
+        if (node.isDirectory) {
+            // 目录：直接打开
+            await window.electronAPI!.openFolder(fullPath);
+        } else {
+            // 文件：在资源管理器中显示并选中
+            await window.electronAPI!.showItemInFolder(fullPath);
         }
     } catch (error: any) {
         console.error('Failed to open in explorer:', error);
         ElMessage.error('打开失败');
+    }
+    closeContextMenu();
+}
+
+/**
+ * 用 VSCode 打开文件
+ */
+async function handleOpenInVSCode() {
+    const node = contextMenu.value.node;
+    if (!node || !isElectron || !props.sessionId) return;
+
+    try {
+        const response = await apiService.getWorkspacePath(props.sessionId);
+        const workspacePath = response.workspacePath;
+        if (!workspacePath) {
+            ElMessage.error('无法获取工作目录路径');
+            closeContextMenu();
+            return;
+        }
+
+        const relativePath = node.path.replace(/\\/g, '/');
+        const separator = workspacePath.endsWith('/') || workspacePath.endsWith('\\') || relativePath.startsWith('/') ? '' : '/';
+        const fullPath = workspacePath + separator + relativePath;
+
+        await window.electronAPI!.openWithEditor(fullPath, 'vscode');
+        ElMessage.success('已通过 VSCode 打开');
+    } catch (error: any) {
+        console.error('Failed to open in VSCode:', error);
+        ElMessage.error('打开失败，请确认已安装 VSCode 且 code 命令可用');
     }
     closeContextMenu();
 }
@@ -912,6 +924,10 @@ async function handleFileSelect(node: WorkspaceNode) {
 
     const ext = node.name.substring(node.name.lastIndexOf('.')).toLowerCase();
 
+    // 通知父组件预览已打开，以便切换分割比例
+    // 注意要先通知后打开
+    emit('preview-open');
+
     // 总是打开预览面板
     selectedFile.value = {
         name: node.name,
@@ -928,7 +944,22 @@ async function handleFileSelect(node: WorkspaceNode) {
         // 文本文件：通过后端 API 读取（已有 5MB 限制）
         previewMode.value = 'text';
         fileContentHash.value = '';
-        await loadFileContent(node.path);
+
+        // HTML 文件走 iframe src 直连，无需加载内容
+        if (isHtmlFile.value) {
+            if (isElectron && window.location.protocol === 'file:') {
+                // Electron 生产环境（file:// 协议）：直接使用 file:// 加载本地文件
+                // 浏览器原生解析所有相对路径（CSS、图片等），无鉴权问题
+                await loadHtmlPreviewLocal(node);
+            } else {
+                // Electron 开发模式（http://）和非 Electron 环境：走后端 html-preview 代理
+                htmlPreviewUrl.value = apiService.getWorkspaceHtmlPreviewUrl(props.sessionId!, node.path);
+            }
+            // 同时加载文件内容，用于源码模式切换
+            await loadFileContent(node.path);
+        } else {
+            await loadFileContent(node.path);
+        }
     } else if (isImageFile(ext)) {
         previewMode.value = 'image';
         // Electron 正式环境（file:// 协议）：直连本地文件，无大小限制
@@ -947,6 +978,8 @@ async function handleFileSelect(node: WorkspaceNode) {
         // 不支持的文件格式
         previewMode.value = 'unsupported';
     }
+
+
 }
 
 /**
@@ -974,6 +1007,32 @@ async function loadImageLocal(node: WorkspaceNode) {
     } catch (error: any) {
         previewError.value = '加载图片失败';
         console.error('[WorkspaceSidebar] Failed to load image locally:', error);
+    }
+}
+
+/**
+ * Electron 环境下加载本地 HTML 文件
+ * 获取工作目录绝对路径，拼接相对路径构造 file:// URL
+ * 浏览器原生处理所有相对路径（CSS、图片等）
+ */
+async function loadHtmlPreviewLocal(node: WorkspaceNode) {
+    try {
+        const resp = await apiService.getWorkspacePath(props.sessionId!);
+        const absWorkspacePath = resp.workspacePath;
+        if (!absWorkspacePath) {
+            previewError.value = '无法获取工作目录路径';
+            return;
+        }
+        const relativePath = node.path.replace(/\\/g, '/');
+        const separator = absWorkspacePath.endsWith('/') || absWorkspacePath.endsWith('\\') ? '' : '/';
+        const fullPath = (absWorkspacePath + separator + relativePath).replace(/\\/g, '/');
+        const encodedPath = encodeURI(fullPath);
+        const fileUrl = encodedPath.startsWith('/') ? `file://${encodedPath}` : `file:///${encodedPath}`;
+        htmlPreviewUrl.value = fileUrl;
+        console.log('[WorkspaceSidebar] HTML local URL:', fileUrl);
+    } catch (error: any) {
+        previewError.value = '加载 HTML 失败';
+        console.error('[WorkspaceSidebar] Failed to load HTML locally:', error);
     }
 }
 
@@ -1033,6 +1092,10 @@ function closePreview() {
     previewError.value = '';
     previewMode.value = null;
     imagePreviewUrl.value = '';
+    htmlPreviewUrl.value = '';
+
+    // 通知父组件预览已关闭，以便恢复分割比例
+    emit('preview-close');
 }
 
 /**
@@ -1042,7 +1105,7 @@ function closePreview() {
  */
 function onImageError(event: Event | string) {
     const src = (typeof event === 'object' && (event as Event).target instanceof HTMLImageElement)
-        ? (event as Event).target!.getAttribute('src')
+        ? (event.target as HTMLImageElement).getAttribute('src')
         : imagePreviewUrl.value;
     console.error('[WorkspaceSidebar] Image load failed, URL:', src);
     previewError.value = isElectron ? '图片加载失败' : '文件过大暂不支持预览';
@@ -1088,6 +1151,23 @@ async function openInFileManager() {
         }
     } catch (error: any) {
         console.error('Failed to open workspace folder:', error);
+    }
+}
+
+/**
+ * 以 VSCode 打开工作目录
+ */
+async function openWorkspaceInVSCode() {
+    if (!props.sessionId || !isElectron) return;
+
+    try {
+        const response = await apiService.getWorkspacePath(props.sessionId);
+        if (response.workspacePath && window.electronAPI) {
+            await window.electronAPI.openWithEditor(response.workspacePath, 'vscode');
+        }
+    } catch (error: any) {
+        console.error('Failed to open workspace in VSCode:', error);
+        ElMessage.error('打开失败，请确认已安装 VSCode 且 code 命令可用');
     }
 }
 
@@ -1174,8 +1254,41 @@ onUnmounted(() => {
 </script>
 <style>
 @import "@/assets/markdown.css";
+
 .code-preview-container pre code.hljs {
-    color: var(--color-text, #333)!important;
+    color: var(--color-text, #333) !important;
+}
+
+/* 代码行号样式 */
+.code-lines {
+    display: flex;
+    flex-direction: column;
+}
+
+.line {
+    display: flex;
+    min-height: 1.5em;
+}
+
+.line-num {
+    box-sizing: content-box;
+    user-select: none;
+    text-align: right;
+    padding-right: 0.75em;
+    color: #9ca3af;
+    font-variant-numeric: tabular-nums;
+    border-right: 1px solid #e5e7eb;
+    margin-right: 0.75em;
+}
+
+.dark .line-num {
+    color: #4b5563;
+    border-right-color: #374151;
+}
+
+.line-content {
+    flex: 1;
+    white-space: pre;
 }
 </style>
 <style scoped>
@@ -1190,8 +1303,9 @@ onUnmounted(() => {
 
 /* Markdown 预览容器 - 复用 markdown-text 样式 */
 .markdown-preview {
-    color: var(--color-text, #333)!important;
+    color: var(--color-text, #333) !important;
 }
+
 .markdown-preview {
     padding: 16px;
     overflow: auto;
@@ -1242,4 +1356,69 @@ onUnmounted(() => {
     color: var(--color-primary, #409eff);
 }
 
+/* 预览/源码模式切换按钮 */
+.preview-mode-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background: transparent;
+    color: #6b7280;
+    transition: all 0.15s ease;
+    outline: none;
+}
+
+.preview-mode-btn:hover {
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+.dark .preview-mode-btn {
+    color: #6b7280;
+}
+
+.dark .preview-mode-btn:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+.preview-mode-btn.is-active {
+    color: #1a1a1a;
+    background-color: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.dark .preview-mode-btn.is-active {
+    color: #fff;
+    background-color: #3a3c42;
+    box-shadow: none;
+}
+
+/* 关闭预览按钮 */
+.preview-close-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background: transparent;
+    color: #1a1a1a;
+    transition: all 0.15s ease;
+    outline: none;
+}
+
+.preview-close-btn:hover {
+    color: #1a1a1a;
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+.dark .preview-close-btn:hover {
+    color: #fff;
+    background-color: rgba(255, 255, 255, 0.08);
+}
 </style>

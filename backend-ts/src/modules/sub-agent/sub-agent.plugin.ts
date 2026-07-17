@@ -20,19 +20,23 @@ export class SubAgentPlugin extends PluginBase {
   }
 
   async onLoad(api: PluginApi) {
-    api.registerToolSet({
-      name: "subagent",
-      loadMode: "lazy",
-      activator: "当需要创建子代理执行独立任务时通过 tool_load 加载",
-      handler: (ctx) => ({
-        loadMode:
-          ctx.sessionType === "team" ? ("eager" as const) : ("lazy" as const),
-      }),
+    const subKit = api.registerToolKit({
+      id: "subagent",
+      name: "Sub-Agent",
+      loadMode: "eager",
+      activator: "Call this toolkit when you need to create a sub-agent to execute an independent task",
+      handler: async (ctx) => {
+        // sub_agent 会话禁止递归加载子代理工具
+        if (ctx.session.sessionType === "sub_agent") {
+          return { loadMode: "none" as const };
+        }
+        return { loadMode: "eager" as const };
+      },
     });
 
-    api.registerTool({
+    // ── spawn：创建 + 执行子代理 ──
+    subKit.registerTool({
       name: "subagent_spawn",
-      toolSet: "subagent",
       description: `创建一个子代理独立执行指定任务。
 子代理拥有独立的对话上下文和工具能力，创建后立即返回子会话 ID。`,
       inputSchema: z.object({
@@ -40,10 +44,10 @@ export class SubAgentPlugin extends PluginBase {
           .string()
           .describe('子代理的名称（简洁明了，如"财报分析"、"代码生成"）'),
         task: z.string().describe("子代理需要完成的具体任务描述（越详细越好）"),
-        characterId: z
+        agentId: z
           .string()
           .optional()
-          .describe("角色 ID（可选，不传则使用默认模型）"),
+          .describe("角色 ID/agent ID（可选，不传则创建通用子代理）"),
         mode: z
           .enum(["foreground", "background"])
           .optional()
@@ -53,15 +57,15 @@ export class SubAgentPlugin extends PluginBase {
       }),
       execute: async (args, ctx, abortSignal) => {
         this.logger.log(
-          `创建子 Agent: ${args.name}, 父会话: ${ctx?.sessionId}`,
+          `创建子 Agent: ${args.name}, 父会话: ${ctx?.session.sessionId}`,
         );
         const result = await this.subAgentManager.spawn(
           {
-            parentSessionId: ctx?.sessionId,
-            userId: ctx?.userId,
+            parentSessionId: ctx?.session.sessionId,
+            userId: ctx?.session.userId,
             name: args.name,
             task: args.task,
-            characterId: args.characterId,
+            characterId: args.agentId,
           },
           args.mode || "foreground",
           abortSignal,
@@ -73,163 +77,148 @@ export class SubAgentPlugin extends PluginBase {
           content: result.status === "completed" ? result.content : undefined,
           message:
             result.status === "running"
-              ? "子代理已创建并开始执行，请使用 wait 获取结果"
+              ? "子代理已创建并开始执行，请使用 subagent_manager wait 获取结果"
               : "子代理执行完成",
         };
       },
       display: { action: "创建子代理", argsKey: "name", icon: "generic" },
     });
 
-    api.registerTool({
-      name: "subagent_wait",
-      toolSet: "subagent",
-      description: "等待子代理执行完成并返回结果摘要",
-      inputSchema: z.object({}),
-      execute: async (_args, ctx, abortSignal) => {
-        this.logger.log(`等待子代理完成: 父会话 ${ctx?.sessionId}`);
-        const completed = await this.subAgentManager.waitForComplete(
-          ctx?.sessionId,
-          120000,
-          abortSignal,
-        );
-        if (completed.length === 0) {
-          return {
-            success: true,
-            message: "没有进行中的子代理任务",
-          };
-        }
-        return {
-          success: true,
-          completedSubAgents: completed.map((c: any) => ({
-            sessionId: c.subSessionId,
-            name: c.name,
-            status: c.result?.status,
-            content: c.result?.content,
-            reasoningContent: c.result?.reasoningContent,
-            finishReason: c.result?.finishReason,
-          })),
-          message: `以下子代理已完成: ${completed.map((c: any) => c.name).join(", ")}`,
-        };
-      },
-      display: { action: "等待子代理", icon: "generic" },
-    });
-
-    api.registerTool({
-      name: "subagent_close",
-      toolSet: "subagent",
-      description: "关闭指定子代理并删除其会话数据",
+    // ── manager：管理子代理（wait / list / close / send_message）──
+    subKit.registerTool({
+      name: "subagent_manager",
+      description: `管理子代理：等待完成 / 关闭 / 列表 / 发送消息`,
       inputSchema: z.object({
-        sessionId: z.string().describe("要关闭的子代理会话 ID"),
-      }),
-      execute: async (args, ctx) => {
-        try {
-          await this.subAgentManager.closeSubAgent(
-            args.sessionId,
-            ctx?.sessionId,
-            ctx?.userId,
-            ctx?.workspacePath,
-          );
-          return {
-            success: true,
-            message: "子代理已关闭并删除",
-          };
-        } catch (e: any) {
-          return {
-            success: false,
-            message: e.message || "关闭子代理失败",
-          };
-        }
-      },
-      display: { action: "关闭子代理", argsKey: "sessionId", icon: "generic" },
-    });
-
-    api.registerTool({
-      name: "subagent_list",
-      toolSet: "subagent",
-      description: "获取当前父会话下所有子代理列表",
-      inputSchema: z.object({}),
-      execute: async (_args, ctx) => {
-        const agents = await this.subAgentManager.getSubAgents(ctx?.sessionId);
-        return {
-          success: true,
-          sub_agents: agents,
-          total: agents.length,
-        };
-      },
-      display: { action: "列出子代理", icon: "generic" },
-    });
-
-    api.registerTool({
-      name: "subagent_send_message",
-      toolSet: "subagent",
-      description: "向已存在的子代理发送消息继续交互",
-      inputSchema: z.object({
-        sessionId: z.string().describe("子代理的会话 ID"),
-        message: z.string().describe("要发送给子代理的消息内容"),
+        action: z.enum(["wait", "list", "close", "send_message"]),
+        sessionId: z
+          .string()
+          .optional()
+          .describe("close 或 send_message 时需要"),
+        message: z.string().optional().describe("send_message 时需要"),
       }),
       execute: async (args, ctx, abortSignal) => {
-        try {
-          const result = await this.subAgentManager.sendMessage(
-            {
-              parentSessionId: ctx?.sessionId,
-              userId: ctx?.userId,
-              sessionId: args.sessionId,
-              message: args.message,
-            },
-            "foreground",
-            abortSignal,
-          );
-          return {
-            success: true,
-            sessionId: result.subSessionId,
-            status: result.status,
-            content: result.status === "completed" ? result.content : undefined,
-            message:
-              result.status === "running"
-                ? "消息已发送，子代理开始执行，请使用 wait 获取结果"
-                : "子代理执行完成",
-          };
-        } catch (e: any) {
-          return {
-            success: false,
-            message: e.message || "发送消息失败",
-          };
+        const { action, sessionId, message } = args as {
+          action: string;
+          sessionId?: string;
+          message?: string;
+        };
+        switch (action) {
+          case "wait": {
+            this.logger.log(`等待子代理完成: 父会话 ${ctx?.session.sessionId}`);
+            const completed = await this.subAgentManager.waitForComplete(
+              ctx?.session.sessionId,
+              120000,
+              abortSignal,
+            );
+            if (completed.length === 0) {
+              return { success: true, message: "没有进行中的子代理任务" };
+            }
+            return {
+              success: true,
+              completedSubAgents: completed.map((c: any) => ({
+                sessionId: c.subSessionId,
+                name: c.name,
+                status: c.result?.status,
+                content: c.result?.content,
+                reasoningContent: c.result?.reasoningContent,
+                finishReason: c.result?.finishReason,
+              })),
+              message: `以下子代理已完成: ${completed.map((c: any) => c.name).join(", ")}`,
+            };
+          }
+
+          case "list": {
+            const agents = await this.subAgentManager.getSubAgents(
+              ctx?.session.sessionId,
+            );
+            return { success: true, sub_agents: agents, total: agents.length };
+          }
+
+          case "close": {
+            if (!sessionId)
+              return { success: false, message: "缺少 sessionId" };
+            try {
+              await this.subAgentManager.closeSubAgent(
+                sessionId,
+                ctx?.session.sessionId,
+                ctx?.session.userId,
+                ctx?.session.workspacePath,
+              );
+              return { success: true, message: "子代理已关闭并删除" };
+            } catch (e: any) {
+              return { success: false, message: e.message || "关闭子代理失败" };
+            }
+          }
+
+          case "send_message": {
+            if (!sessionId || !message)
+              return { success: false, message: "缺少 sessionId 或 message" };
+            try {
+              const result = await this.subAgentManager.sendMessage(
+                {
+                  parentSessionId: ctx?.session.sessionId,
+                  userId: ctx?.session.userId,
+                  sessionId,
+                  message,
+                },
+                "foreground",
+                abortSignal,
+              );
+              return {
+                success: true,
+                sessionId: result.subSessionId,
+                status: result.status,
+                content:
+                  result.status === "completed" ? result.content : undefined,
+                message:
+                  result.status === "running"
+                    ? "消息已发送，子代理开始执行"
+                    : "子代理执行完成",
+              };
+            } catch (e: any) {
+              return { success: false, message: e.message || "发送消息失败" };
+            }
+          }
+
+          default:
+            return { success: false, message: `未知操作: ${action}` };
         }
       },
-      display: {
-        action: "向子代理发消息",
-        argsKey: "sessionId",
-        icon: "generic",
-      },
+      display: { action: "管理子代理", argsKey: "action", icon: "generic" },
     });
 
-    api.registerPrompt({
-      toolSet: "subagent",
+    // ── Prompt ──
+    subKit.registerPrompt({
       frequency: "REGULAR",
       description: "子代理工具使用说明",
-      content: `# 子代理工具
+      content: `# Overall Principles for Using Sub-Agents
 
-你可以使用以下工具来管理子代理：
+The preset list provides you with dedicated agents that are visible by default and have built-in system instructions. However, this does not mean you are restricted to only these. You are still free to use the generic agent, or create sub-tasks based on any agent explicitly specified by the user.
 
-## subagent_spawn
-创建子代理独立执行任务。子代理拥有独立的对话上下文和工具能力。
+1. When to Use
+   - The task involves heavy reasoning, e.g., in-depth debugging, complex code review, technical research.
+   - You care only about the final deliverable and do not need to intervene in the sub-task's execution in real time.
+   - The sub-task is independent and can run in parallel with other tasks without blocking.
 
-**何时使用**：
-- 需要并行处理多个独立任务
-- 有一个耗时任务需要异步执行
-- 需要隔离不同任务的上下文
+2. When NOT to Use
+   - The task can be completed with a single tool call → directly call that tool; no need to spawn a sub-agent.
+   - The task requires soliciting user input or obtaining real-time feedback during execution → sub-agents cannot directly interact with users; such interactions must remain in the main flow.
 
-## subagent_wait
-等待当前会话创建的子代理执行完成并返回结果。
+3. Priority for Selecting a Sub-Agent
+   When you decide that a sub-task is needed, determine which agent to use strictly in the following priority:
+   1) User explicitly specifies (highest priority): If the user @mentions or clearly provides an agentId (regardless of whether that ID exists in the preset list), you must unconditionally use that agent.
+   2) Predefined specialized agent (second priority): If the user does not specify, scan the descriptions of agents in the preset list and match one that best fits the current requirements.
+   3) Generic fallback (default): If no preset agent matches, or the current task is not suitable for a specialized agent, omit the agentId and automatically use the generic sub-agent.
 
-## subagent_close
-关闭指定子代理。
+4. Detailed Rules for agentId
+   - This parameter is optional; leaving it empty invokes the generic sub-agent.
+   - You can obtain preset agent IDs from the system-provided preset list (if it exists).
 
-## subagent_list
-获取当前所有子代理列表。
-
-## subagent_send_message
-向已存在的子代理发送新消息继续交互。`,
+5. Critical Operational Guidelines (Cautions)
+   - Boundary isolation: When splitting tasks, the boundaries must be absolutely clear. It is strictly forbidden to assign the same file to multiple sub-agents for modification, or to have overlapping responsibilities among different sub-agents.
+   - Resource release: Once a sub-task finishes and no further interaction with that sub-agent is required, you must immediately call close to release session resources in a timely manner.
+   - Transparency management: Users cannot see the internal interaction logs between you and the sub-agents. You must not assume that users are aware of execution details. Ultimately, you must summarize and distill the results of sub-tasks and present them to the user in a clear, structured form.
+`,
     });
   }
 }

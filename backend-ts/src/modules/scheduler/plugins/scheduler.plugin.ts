@@ -21,15 +21,15 @@ export class SchedulerPlugin extends PluginBase {
   }
 
   async onLoad(api: PluginApi) {
-    api.registerToolSet({
+    const schedKit = api.registerToolKit({
+      id: "scheduler",
+      name: "Scheduled Tasks",
       loadMode: "lazy",
-      name: "scheduler",
       activator:
-        "定时任务管理工具，用于创建、查看、删除定时任务，当你需要在指定时间自动执行某项任务时，可以使用此工具",
+        "Scheduled task management tool for creating, viewing, and deleting scheduled tasks. Use this tool when you need to automatically execute a task at a specified time.",
     });
 
-    api.registerTool({
-      toolSet: "scheduler",
+    schedKit.registerTool({
       name: "scheduler_create_task",
       description:
         "创建一个定时任务，让 AI 可以在指定时间自动执行提示词。定时器本身不会自动获得执行结果，仅仅是发送提示词，本质是一个「闹钟」。",
@@ -73,9 +73,9 @@ export class SchedulerPlugin extends PluginBase {
           .describe("重试间隔（秒），默认 60"),
       }),
       execute: async (args, ctx) => {
-        const userId = ctx?.userId;
+        const userId = ctx?.session.userId;
         if (!userId) throw new Error("无法获取用户ID，无法创建定时任务");
-        const sessionId = ctx?.sessionId;
+        const sessionId = ctx?.session.sessionId;
         if (!sessionId) throw new Error("无法获取会话ID，无法创建定时任务");
 
         const scheduleType = args.schedule_type;
@@ -118,13 +118,12 @@ export class SchedulerPlugin extends PluginBase {
       display: { action: "创建定时任务", argsKey: "name", icon: "time" },
     });
 
-    api.registerTool({
-      toolSet: "scheduler",
+    schedKit.registerTool({
       name: "scheduler_list_tasks",
       description: "获取当前用户的所有定时任务列表",
       inputSchema: z.object({}),
       execute: async (_args, ctx) => {
-        const userId = ctx?.userId;
+        const userId = ctx?.session.userId;
         if (!userId) throw new Error("无法获取用户ID");
         const tasks = await this.schedulerService.getTasks(userId);
         return JSON.stringify({
@@ -148,15 +147,14 @@ export class SchedulerPlugin extends PluginBase {
       display: { action: "列出定时任务", icon: "time" },
     });
 
-    api.registerTool({
-      toolSet: "scheduler",
+    schedKit.registerTool({
       name: "scheduler_delete_task",
       description: "删除指定的定时任务",
       inputSchema: z.object({
         task_id: z.string().describe("要删除的定时任务 ID"),
       }),
       execute: async (args, ctx) => {
-        const userId = ctx?.userId;
+        const userId = ctx?.session.userId;
         if (!userId) throw new Error("无法获取用户ID");
         if (!args.task_id) throw new Error("需要提供 task_id");
         await this.schedulerService.deleteTask(args.task_id, userId);
@@ -165,15 +163,14 @@ export class SchedulerPlugin extends PluginBase {
       display: { action: "删除定时任务", icon: "time" },
     });
 
-    api.registerTool({
-      toolSet: "scheduler",
+    schedKit.registerTool({
       name: "scheduler_toggle_task",
       description: "启用或禁用指定的定时任务",
       inputSchema: z.object({
         task_id: z.string().describe("要启用或禁用的定时任务 ID"),
       }),
       execute: async (args, ctx) => {
-        const userId = ctx?.userId;
+        const userId = ctx?.session.userId;
         if (!userId) throw new Error("无法获取用户ID");
         if (!args.task_id) throw new Error("需要提供 task_id");
         const task = await this.schedulerService.toggleTask(
@@ -193,37 +190,36 @@ export class SchedulerPlugin extends PluginBase {
       display: { action: "切换定时任务状态", icon: "time" },
     });
 
-    api.registerPrompt({
-      toolSet: "scheduler",
+    schedKit.registerPrompt({
       frequency: "REGULAR",
       description: "定时任务工具使用说明",
       content: [
-        "# 定时任务工具使用说明",
+        "# Scheduled Task Tool Instructions",
         "",
-        "你可以使用这些工具帮助用户创建和管理定时任务。任务会在指定时间自动将提示词以用户消息的形式发送到当前对话中。定时器本身不会自动获得执行结果，仅仅是发送提示词，你可以理解为其本质是一个「闹钟」。",
+        "You can use these tools to help users create and manage scheduled tasks. Tasks will automatically send the prompt as a user message to the current conversation at the specified time. The scheduler itself does not automatically retrieve execution results — it only sends the prompt. You can think of it as an \"alarm clock\".",
         "",
-        "## 使用场景示例",
+        "## Example Scenarios",
         "",
-        "- 用户说'每天早上9点给我发一份新闻汇总' → 使用 scheduler_create_task 创建 cron 任务",
-        "- 用户说'一小时后提醒我开会' → 使用 scheduler_create_task 创建 once 任务",
-        "- 用户说'查看我所有的定时任务' → 使用 scheduler_list_tasks",
-        "- 用户说'删除那个早报任务' → 使用 scheduler_delete_task",
+        "- User says 'Send me a news summary every morning at 9 AM' → use scheduler_create_task to create a cron task",
+        "- User says 'Remind me about the meeting in one hour' → use scheduler_create_task to create a once task",
+        "- User says 'Show me all my scheduled tasks' → use scheduler_list_tasks",
+        "- User says 'Delete that morning news task' → use scheduler_delete_task",
         "",
-        "## cron 表达式常用示例",
+        "## Common Cron Expressions",
         "",
-        "| 需求 | 表达式 |",
+        "| Requirement | Expression |",
         "|------|--------|",
-        "| 每分钟 | `* * * * *` |",
-        "| 每小时 | `0 * * * *` |",
-        "| 每天9点 | `0 9 * * *` |",
-        "| 每周一9点 | `0 9 * * 1` |",
-        "| 每月1日0点 | `0 0 1 * *` |",
+        "| Every minute | `* * * * *` |",
+        "| Every hour | `0 * * * *` |",
+        "| Daily at 9 AM | `0 9 * * *` |",
+        "| Every Monday at 9 AM | `0 9 * * 1` |",
+        "| 1st of each month at midnight | `0 0 1 * *` |",
         "",
-        "## 重要提醒",
+        "## Important Reminders",
         "",
-        "1. 创建的任务会自动注入到当前会话中执行，不需要指定会话ID",
-        "2. 任务创建后会立即生效，到达设定时间自动触发",
-        "3. 建议为用户设置合理的任务名称，方便后续管理",
+        "1. Tasks are automatically injected into the current session for execution — no session ID is required",
+        "2. Tasks take effect immediately after creation and will trigger automatically at the set time",
+        "3. It is recommended to set a reasonable task name for the user to facilitate future management",
       ].join("\n"),
     });
   }

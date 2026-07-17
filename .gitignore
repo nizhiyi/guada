@@ -39,3 +39,5 @@ log.txt
 frontend/src/nul
 .atomcode/graph.bin
 .trae/**
+backend-ts/src/nul
+.guada/**

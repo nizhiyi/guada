@@ -1,6 +1,7 @@
 import { Logger, Injectable } from "@nestjs/common";
 import * as fs from "fs/promises";
 import * as path from "path";
+import fg from "fast-glob";
 import { PluginBase } from "../base-plugin";
 import { PluginContext } from "../types/plugin.types";
 import { WorkspaceService } from "../../../common/services/workspace.service";
@@ -27,38 +28,44 @@ export class FilePlugin extends PluginBase {
     api.registerTool({
       name: "read",
       description:
-        "读取指定路径的文本文件内容，支持按行或按字符分页。读取到硬上限（20KB）时自动截断，返回 next 参数供继续读取。",
+        "Read the content of a text file at the specified path, supports pagination by line or by character. Automatically truncates at a hard limit (20KB) and returns a next parameter for continued reading.",
       inputSchema: z.object({
         file_path: z
           .string()
-          .describe("要读取的文件路径，可以是绝对路径或相对工作目录的相对路径"),
+          .describe(
+            "Path to the file to read, can be an absolute path or a relative path relative to the working directory",
+          ),
         encoding: z
           .string()
           .optional()
-          .describe("文件编码，如 utf-8、gbk，默认自动检测"),
+          .describe(
+            "File encoding, e.g., utf-8, gbk; auto-detected by default",
+          ),
         unit: z
           .enum(["line", "char"])
           .optional()
           .describe(
-            "偏移单位：line=按行读取（默认），char=按字符读取。当 truncated=true 时使用返回的 next.unit 继续",
+            "Offset unit: line=read by line (default), char=read by character. When truncated=true, use the returned next.unit to continue",
           ),
         offset: z
           .number()
           .int()
           .optional()
-          .describe("起始位置（行号或字符偏移），负数表示从末尾倒数（如 -10 最后 10 行），默认 0"),
+          .describe(
+            "Starting position (line number or character offset); negative values count from the end (e.g., -10 = last 10 lines), default 0",
+          ),
         limit: z
           .number()
           .int()
           .min(1)
           .optional()
           .describe(
-            "读取数量：unit=line 时最多读取行数（默认 200），unit=char 时最多读取字符数（默认 20000）",
+            "Number to read: when unit=line, max lines to read (default 200); when unit=char, max characters to read (default 20000)",
           ),
       }),
       execute: async (args, ctx) => {
         const { file_path, encoding, unit = "line", offset = 0, limit } = args;
-        if (!file_path) throw new Error("文件路径不能为空");
+        if (!file_path) throw new Error("File path cannot be empty");
 
         const resolvedPath = this.resolvePath(file_path, ctx);
         this.logger.log(
@@ -99,7 +106,8 @@ export class FilePlugin extends PluginBase {
 
         // 按行读取
         const lineLimit = limit ?? 200;
-        const effectiveOffset = offset < 0 ? Math.max(0, totalLines + offset) : offset;
+        const effectiveOffset =
+          offset < 0 ? Math.max(0, totalLines + offset) : offset;
         const startLine = Math.min(effectiveOffset, totalLines);
 
         // 计算起始行的原始字符位置
@@ -134,14 +142,14 @@ export class FilePlugin extends PluginBase {
         nextCharOffset += charsRead;
 
         const hasMoreLines = endLine < totalLines;
-        const truncated = hasMoreLines || truncatedByBytes;
+        const truncated = truncatedByBytes;
         const result: any = {
           content,
           truncated,
           total_lines: totalLines,
           total_chars: totalChars,
         };
-        if (truncated) {
+        if (truncatedByBytes || hasMoreLines) {
           if (truncatedByBytes) {
             result.next = {
               unit: "char",
@@ -152,80 +160,89 @@ export class FilePlugin extends PluginBase {
             result.next = { unit: "line", offset: endLine, limit: lineLimit };
           }
         }
-        return JSON.stringify(result);
+        return result;
       },
       display: { action: "读取文件", argsKey: "file_path", icon: "read" },
     });
 
     api.registerTool({
-      name: "list",
-      description: "列出指定目录下的文件和子目录，支持递归深度控制。",
+      name: "glob",
+      description:
+        "Search for files using a glob pattern (e.g., **/*.ts, *.json, src/**/*.css). Returns a flat file list. Supports depth control and result limits.",
       inputSchema: z.object({
-        path: z
+        pattern: z
           .string()
-          .describe("要列出的目录路径，可以是绝对路径或相对工作目录的相对路径"),
+          .describe("Glob pattern, e.g., **/*.ts, *.json, src/**/*"),
+        directory: z
+          .string()
+          .optional()
+          .describe(
+            "Base directory, defaults to the current working directory",
+          ),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Maximum number of files to return, default 100"),
         depth: z
           .number()
           .int()
-          .min(0)
-          .max(3)
+          .nonnegative()
           .optional()
-          .describe("递归深度，0=仅当前目录，默认 1，最大 3"),
+          .describe(
+            "Recursion depth: 0=current directory only, omit=unlimited",
+          ),
       }),
       execute: async (args, ctx) => {
-        const { path: dirPath, depth = 1 } = args;
-        if (!dirPath) throw new Error("目录路径不能为空");
-        const resolvedPath = this.resolvePath(dirPath, ctx);
-        const stats = await fs.stat(resolvedPath);
-        if (!stats.isDirectory())
-          throw new Error(`${resolvedPath} 不是一个目录`);
+        const { pattern, directory, limit = 100, depth } = args;
+        if (!pattern) throw new Error("pattern 不能为空");
 
-        const readDir = async (p: string, d: number): Promise<any[]> => {
-          const items: any[] = [];
-          const entries = await fs.readdir(p, { withFileTypes: true });
-          for (const entry of entries) {
-            const fullPath = path.join(p, entry.name);
-            const relativePath = path
-              .relative(ctx?.workspacePath || "", fullPath)
-              .replace(/\\/g, "/");
-            if (entry.isDirectory()) {
-              const children = d > 1 ? await readDir(fullPath, d - 1) : [];
-              items.push({
-                name: entry.name,
-                type: "directory",
-                path: relativePath,
-                children,
-              });
-            } else {
-              items.push({
-                name: entry.name,
-                type: "file",
-                path: relativePath,
-              });
-            }
-          }
-          return items;
-        };
+        const basePath = directory
+          ? this.resolvePath(directory, ctx)
+          : ctx?.session.workspacePath || process.cwd();
 
-        const items = await readDir(resolvedPath, Math.min(depth, 3));
+        // fast-glob deep 语义：1=当前目录, 2=一级, ... N=N-1级
+        const deep = depth !== undefined ? depth + 1 : undefined;
+
+        const files = await fg(pattern, {
+          cwd: basePath,
+          deep,
+          onlyFiles: true,
+          dot: false,
+          absolute: false,
+        });
+
+        const result = limit ? files.slice(0, limit) : files;
+        const total = files.length;
+        const truncated = total > result.length;
+
         return {
-          path: resolvedPath,
-          items,
-          total: items.length,
+          pattern,
+          directory: basePath,
+          total,
+          truncated,
+          files: result,
         };
       },
-      display: { action: "列出目录", argsKey: "path", icon: "search" },
+      display: { action: "搜索文件", argsKey: "pattern", icon: "search" },
     });
 
     api.registerTool({
       name: "write",
-      description: "将内容全量写入指定文件，自动创建目录。",
+      description:
+        "Write content to the specified file in full, automatically creating directories.",
       inputSchema: z.object({
         file_path: z
           .string()
-          .describe("要写入的文件路径，可以是绝对路径或相对工作目录的相对路径"),
-        content: z.string().describe("要写入的文件内容"),
-        encoding: z.string().optional().describe("文件编码，默认 utf-8"),
+          .describe(
+            "Path to the file to write, can be an absolute path or a relative path relative to the working directory",
+          ),
+        content: z.string().describe("File content to write"),
+        encoding: z
+          .string()
+          .optional()
+          .describe("File encoding, default utf-8"),
       }),
       execute: async (args, ctx) => {
         const { file_path, content, encoding = "utf-8" } = args;
@@ -250,46 +267,67 @@ export class FilePlugin extends PluginBase {
     api.registerTool({
       name: "edit",
       description:
-        "在文件中查找并替换指定文本。old_text 必须精确匹配原文中的一段连续文本。",
+        "Find and replace specified text in a file. old_text must exactly match a contiguous segment in the original file. Prefer this tool for partial edits.",
       inputSchema: z.object({
         file_path: z
           .string()
-          .describe("要编辑的文件路径，可以是绝对路径或相对工作目录的相对路径"),
+          .describe(
+            "Path to the file to edit, can be an absolute path or a relative path relative to the working directory",
+          ),
         old_text: z
           .string()
-          .describe("要被替换的旧文本，必须精确匹配原文中的一段连续文本"),
-        new_text: z.string().describe("替换后的新文本"),
-        encoding: z.string().optional().describe("文件编码，默认 utf-8"),
+          .describe(
+            "The old text to be replaced; must exactly match a contiguous segment in the original file",
+          ),
+        new_text: z.string().describe("The new text to replace with"),
+        encoding: z
+          .string()
+          .optional()
+          .describe("File encoding, default utf-8"),
       }),
       execute: async (args, ctx) => {
         const { file_path, old_text, new_text, encoding = "utf-8" } = args;
-        if (!file_path) throw new Error("文件路径不能为空");
-        if (!old_text) throw new Error("old_text 不能为空");
-        if (new_text === undefined) throw new Error("new_text 不能为空");
+        if (!file_path) throw new Error("file_path is required");
+        if (!old_text) throw new Error("old_text is required");
+        if (new_text === undefined) throw new Error("new_text is required");
         const resolvedPath = this.resolvePath(file_path, ctx);
         this.validateWritePath(file_path, ctx);
         this.logger.log(`编辑文件: ${file_path}`);
         const content = await fs.readFile(resolvedPath, {
           encoding: encoding as BufferEncoding,
         });
-        let modified: string;
-        let actualCount = 0;
         if (old_text === new_text) {
-          modified = content;
-        } else {
-          const parts = content.split(old_text);
-          actualCount = parts.length - 1;
-          if (actualCount === 0) throw new Error(`未找到匹配文本: ${old_text}`);
-          modified = parts.join(new_text);
+          return {
+            success: true,
+            message: `File ${resolvedPath} unchanged`,
+            file_path: resolvedPath,
+            replace_count: 1,
+          };
         }
+
+        // 统一换行后匹配（解决 CRLF/LF 不匹配问题）
+        const normContent = content.replace(/\r\n/g, "\n");
+        const normOld = old_text.replace(/\r\n/g, "\n");
+        const idx = normContent.indexOf(normOld);
+        if (idx === -1) {
+          throw new Error(`No match text found: ${old_text}`);
+        }
+
+        // 替换后统一恢复原文件的行尾风格
+        const hasCRLF = content.includes("\r\n");
+        const normResult = normContent.replace(normOld, new_text);
+        const modified = hasCRLF
+          ? normResult.replace(/\n/g, "\r\n")
+          : normResult;
+
         await fs.writeFile(resolvedPath, modified, {
           encoding: encoding as BufferEncoding,
         });
         return {
           success: true,
-          message: `文件 ${resolvedPath} 已修改，共替换 ${actualCount} 处`,
+          message: `File ${resolvedPath} modified`,
           file_path: resolvedPath,
-          replace_count: actualCount,
+          replace_count: 1,
         };
       },
       display: { action: "替换文本", argsKey: "file_path", icon: "edit" },
@@ -299,12 +337,12 @@ export class FilePlugin extends PluginBase {
     api.registerTool({
       name: "delete",
       description:
-        "删除文件或目录（递归删除所有内容）。此操作不可恢复，请谨慎使用！",
+        "Delete a file or directory (recursively deletes all contents). This operation cannot be undone — use with caution!",
       inputSchema: z.object({
         path: z
           .string()
           .describe(
-            "要删除的文件或目录路径，可以是绝对路径或相对工作目录的相对路径",
+            "Path to the file or directory to delete, can be an absolute path or a relative path relative to the working directory",
           ),
       }),
       execute: async (args, ctx) => {
@@ -316,12 +354,20 @@ export class FilePlugin extends PluginBase {
         const stats = await fs.stat(resolvedPath);
         if (stats.isFile()) {
           await fs.unlink(resolvedPath);
-          return { success: true, message: `文件已删除：${resolvedPath}`, path: resolvedPath };
+          return {
+            success: true,
+            message: `文件已删除：${resolvedPath}`,
+            path: resolvedPath,
+          };
         } else if (stats.isDirectory()) {
           await fs.rm(resolvedPath, { recursive: true, force: true });
-          return { success: true, message: `目录已删除：${resolvedPath}`, path: resolvedPath };
+          return {
+            success: true,
+            message: `目录已删除：${resolvedPath}`,
+            path: resolvedPath,
+          };
         }
-        throw new Error(`${resolvedPath} 不是有效的文件或目录`);
+        throw new Error(`${resolvedPath} is not a valid file or directory`);
       },
       display: { action: "删除文件", argsKey: "path", icon: "edit" },
       dangerLevel: "critical",
@@ -330,119 +376,173 @@ export class FilePlugin extends PluginBase {
     api.registerTool({
       name: "grep",
       description:
-        "使用正则表达式搜索文件内容，返回匹配的行及其行号。适合查找特定模式或关键词。",
+        "Search file contents. Supports single-file or recursive directory search (automatically skips node_modules/.git). When pattern is all lowercase, the search is case-insensitive; when it contains uppercase letters, it is case-sensitive.",
       inputSchema: z.object({
-        regex: z.string().describe("要搜索的正则表达式模式"),
+        pattern: z.string().describe("Regex pattern"),
         path: z
           .string()
-          .describe("要搜索的文件路径，可以是绝对路径或相对工作目录的相对路径"),
-        case_sensitive: z
-          .boolean()
           .optional()
-          .describe("是否区分大小写，默认不区分"),
-        max_matches: z
+          .describe(
+            "Target file or directory path, defaults to the working directory. If a directory is given, it will be searched recursively",
+          ),
+        context: z
+          .number()
+          .int()
+          .min(0)
+          .max(10)
+          .optional()
+          .describe("Number of context lines around each match, default 3"),
+        max_results: z
           .number()
           .int()
           .min(1)
+          .max(50)
           .optional()
-          .describe("最多返回的匹配行数，默认 100"),
+          .describe("Maximum number of matching lines to return, default 50"),
       }),
       execute: async (args, ctx) => {
         const {
-          regex: pattern,
+          pattern,
           path: targetPath,
-          case_sensitive = false,
-          max_matches = 100,
+          context = 3,
+          max_results = 50,
         } = args;
-        if (!pattern) throw new Error("正则表达式不能为空");
-        if (!targetPath) throw new Error("文件路径不能为空");
-        const resolvedPath = this.resolvePath(targetPath, ctx);
-        const content = await fs.readFile(resolvedPath, "utf-8");
-        const lines = content.split("\n");
-        const flags = case_sensitive ? "g" : "gi";
+        if (!pattern) throw new Error("pattern is required");
+
+        const basePath = targetPath
+          ? this.resolvePath(targetPath, ctx)
+          : ctx?.session.workspacePath || process.cwd();
+        const stat = await fs.stat(basePath);
+
+        // 相对路径的基准目录（搜索结果返回相对路径，节省 tokens）
+        const relativeRoot = stat.isFile() ? path.dirname(basePath) : basePath;
+
+        const files: string[] = [];
+        if (stat.isFile()) {
+          files.push(basePath);
+        } else if (stat.isDirectory()) {
+          const entries = await fg("**/*", {
+            cwd: basePath,
+            onlyFiles: true,
+            dot: false,
+          });
+          files.push(...entries.map((e) => path.join(basePath, e)));
+        }
+
+        // smart-case：全小写自动不区分，含大写区分
+        const flags = pattern === pattern.toLowerCase() ? "gi" : "g";
         let regex: RegExp;
         try {
           regex = new RegExp(pattern, flags);
         } catch {
-          throw new Error(`无效正则: ${pattern}`);
+          throw new Error(`Invalid regex pattern: ${pattern}`);
         }
-        const matches: Array<{
-          line: number;
-          content: string;
-          matchCount: number;
-        }> = [];
+
+        const fileResults: any[] = [];
         let total = 0;
-        for (let i = 0; i < lines.length && matches.length < max_matches; i++) {
-          const lm = lines[i].match(regex);
-          if (lm) {
-            total += lm.length;
-            matches.push({
-              line: i,
-              content: lines[i].substring(0, 200),
-              matchCount: lm.length,
-            });
+
+        for (const fp of files) {
+          try {
+            const content = await fs.readFile(fp, "utf-8");
+            const lines = content.replace(/\r\n/g, "\n").split("\n");
+            const matchRows: any[] = [];
+
+            for (
+              let i = 0;
+              i < lines.length && matchRows.length < max_results;
+              i++
+            ) {
+              regex.lastIndex = 0;
+              const m = regex.exec(lines[i]);
+              if (m) {
+                const matchIdx = m.index;
+                const matchLen = m[0].length;
+                const ctxLen = 50;
+                const cStart = Math.max(0, matchIdx - ctxLen);
+                const cEnd = Math.min(
+                  lines[i].length,
+                  matchIdx + matchLen + ctxLen,
+                );
+                matchRows.push({
+                  line: i + 1,
+                  content: lines[i].substring(cStart, cEnd),
+                });
+              }
+            }
+            if (matchRows.length > 0) {
+              fileResults.push({
+                file: path.relative(relativeRoot, fp),
+                matched_lines: matchRows.length,
+                matches: matchRows,
+              });
+              total += matchRows.length;
+            }
+          } catch {
+            continue;
           }
         }
+
         return {
-          file_path: resolvedPath,
-          pattern,
           total_matches: total,
-          matched_lines: matches.length,
-          matches,
+          matched_files: fileResults.length,
+          files: fileResults,
         };
       },
-      display: { action: "搜索文件内容", argsKey: "regex", icon: "search" },
+      display: { action: "搜索", argsKey: "pattern", icon: "search" },
     });
 
     api.registerPrompt({
       frequency: "STATIC",
       description: "当前会话工作目录和安全路径说明",
       content: (ctx: PluginContext) => {
-        if (!ctx.workspacePath) return "";
+        if (!ctx.session.workspacePath) return "";
         return [
-          "# 当前会话工作目录",
-          `\`${ctx.workspacePath}\``,
+          "# Working Directory:",
+          `${ctx.session.workspacePath}`,
           "",
-          "**重要说明**：",
-          "1. 你编写的所有脚本、临时文件、生成的数据等都应该存放在上述工作目录中。",
-          "2. **默认路径规则**：所有文件操作工具在处理相对路径时，都会自动以该工作目录为基准。",
-          "   除非用户明确指定了其他绝对路径，否则请始终使用相对路径。",
-          "3. .guada 为特殊目录，只允许存放提示词中指定文件，项目文件、脚本等禁止放在.guada目录下",
+          "**Important Notes**:",
+          "1. All scripts, temporary files, generated data, etc. should be stored in the working directory above.",
+          "2. **Default Path Rule**: All file operation tools automatically use the working directory as the base when handling relative paths.",
+          "   Always use relative paths unless the user explicitly specifies an absolute path.",
+          "3. .guada is a special directory — only store files specified in prompts here. Project files, scripts, etc. must not be placed under .guada.",
         ].join("\n");
       },
-    });
-
-    api.registerPrompt({
-      frequency: "STATIC",
-      description: "文件操作工具使用说明",
-      content: [
-        "# 文件操作工具使用说明",
-        "",
-        "**重要提醒**：",
-        "1. 文件读写类操作优先使用文件工具集而不是命令行",
-        "2. 对于超大文件，请使用分页读取功能，避免一次性加载过多内容",
-        "",
-        "本插件提供以下操作：",
-        "- read：读取文件内容（支持分页）",
-        "- list：列出目录内容（支持递归）",
-        "- write：写入文件（自动创建目录）",
-        "- edit：查找替换文本",
-        "- delete：删除文件/目录",
-        "- grep：正则搜索文件内容",
-      ].join("\n"),
     });
   }
 
   private resolvePath(filePath: string, context?: PluginContext): string {
     return this.workspaceService.resolveFilePath(
       filePath,
-      context?.workspacePath,
+      context?.session.workspacePath,
     );
   }
 
   private validateWritePath(filePath: string, context?: PluginContext): void {
     const resolved = this.resolvePath(filePath, context);
-    const extra = context?.workspacePath ? [context.workspacePath] : [];
+    const extra = context?.session.workspacePath
+      ? [context.session.workspacePath]
+      : [];
     this.workspaceService.validateWritePath(resolved, extra);
+
+    // memory_only 作用域：只允许操作 memory/ 和 memos/ 目录
+    if (context?.session?.getRunMode?.() === "memory") {
+      const allowedPrefixes =
+        context.session.sessionType === "sub_agent"
+          ? [
+              `.guada/subagents/${context.session.sessionId}/memory/`,
+              `.guada/subagents/${context.session.sessionId}/memos/`,
+            ]
+          : [`.guada/memory/`, `.guada/memos/`];
+
+      const normalizedPath = resolved.replace(/\\/g, "/");
+      const isAllowed = allowedPrefixes.some((prefix) =>
+        normalizedPath.includes(prefix),
+      );
+      if (!isAllowed) {
+        throw new Error(
+          `memory_only mode only allows memory/ and memos/ directories`,
+        );
+      }
+    }
   }
 }

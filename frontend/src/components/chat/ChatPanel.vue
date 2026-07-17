@@ -87,10 +87,10 @@
               <ArrowUp />
             </el-icon>
             <span class="text-sm text-gray-700 dark:text-[#c5c7cc]">
-              线程列表 ({{ runningAgentCount }} 运行中)
+              任务列表 ({{ runningAgentCount }} 运行中)
             </span>
             <span class="ml-auto text-xs text-gray-400 dark:text-[#6b6d75]">
-              {{ agentTabs.length - 1 }} 个子线程
+              {{ agentTabs.length - 1 }} 个子任务
             </span>
           </div>
           <!-- 展开的线程列表 -->
@@ -101,13 +101,13 @@
                 'bg-white dark:bg-[#2a2c30] text-gray-900 dark:text-[#e8e9ed]': tab.id === activeTabId,
                 'text-gray-500 dark:text-[#8b8d95] hover:bg-gray-100 dark:hover:bg-[#25262a]': tab.id !== activeTabId,
               }" @click="emit('switch-agent', tab.id)">
+              <span class="text-sm flex-1 truncate">{{ tab.name }}</span>
               <!-- 运行状态指示器 -->
               <el-icon v-if="tab.status === 'running'" class="is-loading text-blue-500" size="12">
                 <Loading />
               </el-icon>
               <span v-else-if="tab.status === 'completed'" class="w-2 h-2 rounded-full bg-green-500" />
               <span v-else class="w-3 h-3 rounded-full bg-red-500" />
-              <span class="text-sm flex-1 truncate">{{ tab.name }}</span>
 
             </div>
           </div>
@@ -205,9 +205,6 @@ const barColor = computed(() => {
   if (pct >= 60) return 'bar-yellow';
   return 'bar-green';
 });
-
-// 初始化流式响应处理器
-const streamHandler = useStreamResponse(sessionStore, apiService)
 
 // Props & Emits - 类型化
 const props = defineProps<{
@@ -803,7 +800,8 @@ async function handleStreamResponse(
   userMessageId?: string | null,
 ) {
   try {
-    await streamHandler.processStream(
+    const handler = useStreamResponse(sessionStore, apiService)
+    await handler.processStream(
       streamingSessionId,
       regenerationMode,
       assistantMessageId,
@@ -817,6 +815,7 @@ async function handleStreamResponse(
     }
     if (error.name !== 'AbortError') {
       notify.error("请求错误", error.message)
+      console.error("请求错误:", error)
     }
   }
 }
@@ -833,7 +832,8 @@ async function handleStreamResponseWithCreate(
   knowledgeBaseIds?: string[],
 ) {
   try {
-    await streamHandler.processStreamWithCreate(
+    const handler = useStreamResponse(sessionStore, apiService)
+    await handler.processStreamWithCreate(
       streamingSessionId,
       content,
       fileIds,
@@ -854,6 +854,10 @@ async function handleStreamResponseWithCreate(
 // 消息操作方法
 function abortResponse() {
   if (currentSessionId.value) {
+    // 立即更新本地流状态
+    sessionStore.setSidebarFlag(currentSessionId.value, 'working', false)
+    sessionStore.setSessionIsStreaming(currentSessionId.value, false)
+
     apiService.cancelResponse(currentSessionId.value);
   }
 }
@@ -1072,7 +1076,8 @@ async function handleStreamResponseAsSubscriber(
       ? lastAssistantMessage.contents[lastAssistantMessage.contents.length - 1].id
       : null;
 
-    await streamHandler.processStream(
+    const handler = useStreamResponse(sessionStore, apiService)
+    await handler.processStream(
       streamingSessionId,
       'subscribe',
       null,

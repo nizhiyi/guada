@@ -1,6 +1,6 @@
 <template>
     <el-dialog v-model="visible" :close-on-click-modal="false" width="900px"
-        :style="{ minHeight: '80vh', maxHeight: '95vh', maxWidth: '90vw' }" class="character-setting-dialog" destroy-on-close>
+        :style="{ minHeight: '80vh', maxHeight: '95vh', maxWidth: '90vw' }" class="character-setting-dialog" destroy-on-close append-to-body>
         <template #header>
             <div class="dialog-header">
                 <span class="dialog-title">{{ currentCharacter?.id ? '编辑角色' : '新建角色' }}</span>
@@ -8,7 +8,7 @@
         </template>
 
         <div class="dialog-content">
-            <CharacterSettingPanel ref="settingPanelRef" :data="currentCharacter" :simple="false" class="flex-1" />
+            <CharacterSettingPanel ref="settingPanelRef" :data="currentCharacter" :is-new="!props.characterId" :simple="false" class="flex-1" />
         </div>
 
         <template #footer>
@@ -50,28 +50,22 @@ watch(() => props.show, (newVal) => {
     visible.value = newVal
 }, { immediate: true })
 
-watch(visible, (newVal) => {
+// 对话框每次打开：清空旧数据 + 重新 fetch（统一入口，避免重复请求）
+watch(visible, async (newVal) => {
     if (!newVal) {
         emit('update:show', false)
-    } else if (!props.characterId) {
-        // 对话框打开且为新建模式时，清空上次残留的数据
-        currentCharacter.value = {};
+        return
     }
-})
-
-// 监听角色 ID 变化并加载数据
-watch(() => props.characterId, async (newVal) => {
-    if (newVal) {
+    currentCharacter.value = {};
+    if (props.characterId) {
         try {
-            currentCharacter.value = await apiService.fetchCharacter(newVal);
+            currentCharacter.value = await apiService.fetchCharacter(props.characterId);
         } catch (error) {
             console.error("[CharacterModal] Failed to fetch character:", error);
             currentCharacter.value = {};
         }
-    } else {
-        currentCharacter.value = {};
     }
-}, { immediate: true })
+})
 
 // 关闭弹窗
 const handleClose = (): void => {

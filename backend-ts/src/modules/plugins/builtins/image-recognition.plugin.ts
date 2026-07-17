@@ -38,58 +38,59 @@ export class ImageRecognitionPlugin extends PluginBase {
   }
 
   async onLoad(api: PluginApi) {
-    api.registerToolSet({
-      name: "image_recognition",
+    api.registerToolKit({
+      id: "image_recognition",
+      name: "Image Recognition",
+      loadMode: "lazy",
       activator:
-        "当用户提供图片ID或图片路径时，使用此工具识别图片内容并返回详细描述。",
-    });
+        "Use this toolkit when you need to recognize image content from a user-provided image ID or image path and return a detailed description.",
+      onLoad: (toolkit) => {
+        toolkit.registerTool({
+          name: "image_recognize",
+          description:
+            "识别图片内容并返回详细的文本描述。当用户询问关于上传图片的内容时使用此工具。",
+          inputSchema: z.object({
+            image_id: z
+              .string()
+              .describe("Uploaded image file ID, usually obtained from the message context"),
+          }),
+          execute: async (args, _ctx, abortSignal) => {
+            const { image_id } = args;
+            if (!image_id) throw new Error("缺少参数：image_id");
+            const file = await this.fileRepo.findById(image_id);
+            if (!file || file.fileType !== "image")
+              throw new Error(`无效的图片 ID 或文件类型不是图片：${image_id}`);
+            const physicalPath = this.uploadPathService.toPhysicalPath(file.url);
+            if (!fs.existsSync(physicalPath))
+              throw new Error(`图片文件不存在: ${physicalPath}`);
+            return this.recognizeImage(physicalPath, abortSignal);
+          },
+          display: { action: "识别图片", argsKey: "image_id", icon: "vision" },
+        });
 
-    api.registerTool({
-      name: "image_recognize",
-      toolSet: "image_recognition",
-      description:
-        "识别图片内容并返回详细的文本描述。当用户询问关于上传图片的内容时使用此工具。",
-      inputSchema: z.object({
-        image_id: z
-          .string()
-          .describe("上传的图片文件 ID，通常从消息上下文中获取"),
-      }),
-      execute: async (args, _ctx, abortSignal) => {
-        const { image_id } = args;
-        if (!image_id) throw new Error("缺少参数：image_id");
-        const file = await this.fileRepo.findById(image_id);
-        if (!file || file.fileType !== "image")
-          throw new Error(`无效的图片 ID 或文件类型不是图片：${image_id}`);
-        const physicalPath = this.uploadPathService.toPhysicalPath(file.url);
-        if (!fs.existsSync(physicalPath))
-          throw new Error(`图片文件不存在: ${physicalPath}`);
-        return this.recognizeImage(physicalPath, abortSignal);
+        toolkit.registerTool({
+          name: "image_recognize_by_path",
+          description:
+            "根据图片文件路径识别图片内容并返回详细的文本描述。当用户提供图片的绝对路径或相对路径时使用此工具。",
+          inputSchema: z.object({
+            image_path: z
+              .string()
+              .describe("Path to the image file, can be an absolute path or a relative path relative to the working directory"),
+          }),
+          execute: async (args, ctx, abortSignal) => {
+            const { image_path } = args;
+            if (!image_path) throw new Error("图片路径不能为空");
+            let physicalPath = this.workspaceService.resolveFilePath(
+              image_path,
+              ctx?.session.workspacePath,
+            );
+            if (!fs.existsSync(physicalPath))
+              throw new Error(`图片文件不存在：${physicalPath}`);
+            return this.recognizeImage(physicalPath, abortSignal);
+          },
+          display: { action: "识别图片", argsKey: "image_path", icon: "vision" },
+        });
       },
-      display: { action: "识别图片", argsKey: "image_id", icon: "vision" },
-    });
-
-    api.registerTool({
-      name: "image_recognize_by_path",
-      toolSet: "image_recognition",
-      description:
-        "根据图片文件路径识别图片内容并返回详细的文本描述。当用户提供图片的绝对路径或相对路径时使用此工具。",
-      inputSchema: z.object({
-        image_path: z
-          .string()
-          .describe("图片文件的路径，可以是绝对路径或相对工作目录的相对路径"),
-      }),
-      execute: async (args, ctx, abortSignal) => {
-        const { image_path } = args;
-        if (!image_path) throw new Error("图片路径不能为空");
-        let physicalPath = this.workspaceService.resolveFilePath(
-          image_path,
-          ctx?.workspacePath,
-        );
-        if (!fs.existsSync(physicalPath))
-          throw new Error(`图片文件不存在：${physicalPath}`);
-        return this.recognizeImage(physicalPath, abortSignal);
-      },
-      display: { action: "识别图片", argsKey: "image_path", icon: "vision" },
     });
   }
 
@@ -98,9 +99,30 @@ export class ImageRecognitionPlugin extends PluginBase {
     abortSignal?: AbortSignal,
   ): Promise<string> {
     try {
-      const modelConfig = await this.settingsStorage.getSettings(SK_MOD_VISUAL);
-      const model = modelConfig?.model?.trim() || "gpt-4o";
-      const thinkingEffort = resolveThinkingEffort(model);
+      // 1. 从 settings 读取视觉模型 ID
+      const visualModelId = await this.settingsStorage.getSettingValue(
+        "models",
+        SK_MOD_VISUAL,
+      );
+      if (!visualModelId) {
+        throw new Error(
+          "请在系统设置中配置视觉辅助模型 (defaultVisualAssistantModelId)",
+        );
+      }
+
+      // 2. 从数据库查询模型完整配置（含 provider）
+      const visualModelConfig = await this.prisma.model.findUnique({
+        where: { id: visualModelId },
+        include: { provider: true },
+      });
+      if (!visualModelConfig) {
+        throw new Error(
+          `配置的视觉辅助模型 (ID: ${visualModelId}) 不存在，请检查系统设置`,
+        );
+      }
+
+      const model = visualModelConfig.modelName;
+      const thinkingEffort = resolveThinkingEffort(visualModelConfig, "off");
 
       // 读取图片并转为 base64
       const imageBuffer = fs.readFileSync(physicalPath);
@@ -123,7 +145,7 @@ export class ImageRecognitionPlugin extends PluginBase {
           content: [
             {
               type: "text" as const,
-              text: "请详细描述这张图片的内容，包括但不限于：画面中的主体、人物、物体、场景、文字信息（如果有）、颜色、构图等。",
+              text: "Please describe the content of this image in detail, including but not limited to: the main subject, people, objects, scenes, text (if any), colors, composition, etc.",
             },
             {
               type: "image_url" as const,
@@ -138,6 +160,7 @@ export class ImageRecognitionPlugin extends PluginBase {
         model,
         messages,
         stream: true,
+        providerConfig: visualModelConfig.provider,
         thinkingEffort,
         abortSignal,
       })) as AsyncGenerator<any, void, unknown>;

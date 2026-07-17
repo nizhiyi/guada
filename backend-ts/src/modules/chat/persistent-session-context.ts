@@ -5,12 +5,12 @@ import {
   ModelFeature,
   ToolApprovalConfig,
   MemoryConfig,
+  SessionRunMode,
 } from "./session-context";
 import { SettingsStorage } from "../../common/utils/settings-storage.util";
 import { ModelRepository } from "../../common/database/model.repository";
-import { ToolOrchestrator } from "../tools/tool-orchestrator.service";
-import { ToolRuntime } from "../tools/tool-context";
 import { PluginManager } from "../plugins/plugin.manager";
+import { PromptCollector } from "../plugins/prompt-collector.service";
 import { WorkspaceService } from "../../common/services/workspace.service";
 import { SG_MODELS, SK_MOD_CHAT } from "../../constants/settings.constants";
 import { MessageRecord } from "../llm-core/types/llm.types";
@@ -19,6 +19,9 @@ import {
   IMessageStore,
   ICompressionStrategy,
   CompressionConfig,
+  TokenBreakdown,
+  CompressionCheckpoint,
+  calcTotalTokens,
 } from "./interfaces";
 import {
   SK_MOD_COMPRESS_MODEL,
@@ -26,7 +29,7 @@ import {
 } from "../../constants/settings.constants";
 import { TokenizerService } from "../../common/utils/tokenizer.service";
 import { SummaryMode } from "./compression-engine";
-import { PluginContext } from "../plugins/types/plugin.types";
+import { ResolvedPluginInfo } from "../plugins/types/plugin.types";
 import { SessionTokenTracker } from "./utils/session-token-tracker";
 
 /**
@@ -36,11 +39,17 @@ interface MergedSettings {
   systemPrompt: string;
   thinkingEffort?: string;
   memory: any;
-  modelTemperature?: number;
-  modelTopP?: number;
-  modelFrequencyPenalty?: number;
-  tools?: any;
+  model: {
+    temperature?: number;
+    topP?: number;
+    frequencyPenalty?: number;
+  };
+  // modelTemperature?: number;
+  // modelTopP?: number;
+  // modelFrequencyPenalty?: number;
+  plugins?: any;
   skills?: Record<string, boolean>; // 角色级技能偏好 { skillId: true/false }
+  agents?: Record<string, boolean>; // 角色级 Agent 偏好 { agentId: true/false }
 }
 
 /**
@@ -69,10 +78,11 @@ export class PersistentSessionContext implements ISessionContext {
   // 初始化后构建完成的 DTO（在 initialize() 中一次性填充）
   private modelConfig!: ModelConfig;
   /** system prompt 各部件：base / team / tool / summary */
-  private systemPromptParts: Record<string, string> = {};
+  private preludeParts: MessageRecord[] = [];
   private thinkingEffortValue!: string | undefined;
-  private toolRuntime: ToolRuntime | undefined;
   private toolApprovalConfig!: ToolApprovalConfig;
+  private resolvedPlugins: ResolvedPluginInfo[] = [];
+  private mergedSettings!: MergedSettings;
   private memoryConfig!: MemoryConfig;
   private effectiveContextWindow!: number;
   private _workspacePath!: string;
@@ -83,23 +93,34 @@ export class PersistentSessionContext implements ISessionContext {
   // 对话状态
   private history: MessageRecord[] = [];
   private pendingPersistRecords: MessageRecord[] = [];
-  private systemPromptTokenCount: number = 0;
+  /** 细粒度 Token 统计 */
+  private tokenBreakdown: TokenBreakdown = {
+    systemPrompt: 0,
+    summary: 0,
+    userPrompt: 0,
+    history: 0,
+  };
   private compressionModel: any;
 
-  private currentTokenCount: number = 0;
+  private messagesLoaded: boolean = false;
   private conversationStateLoaded: boolean = false;
+  /** 最近一次加载的压缩断点，传给 execute 避免重复查库 */
+  private loadedCheckpoint: CompressionCheckpoint | null = null;
 
   /** 消息加载游标：第一次 getMessages 时传给 loadMessages，只加载到此消息为止 */
   private messageCursor: string | undefined = undefined;
   /** 会话级 Token 消费追踪器 */
   private tokenTracker: SessionTokenTracker | null = null;
 
+  /** 当前会话运行模式（默认 normal） */
+  private runMode: SessionRunMode = "normal";
+
   constructor(
     private readonly session: any,
     private readonly modelRepository: ModelRepository,
     private readonly settingsStorage: SettingsStorage,
-    private readonly toolOrchestrator: ToolOrchestrator,
     private readonly pluginManager: PluginManager,
+    private readonly promptCollector: PromptCollector,
     private readonly workspaceService: WorkspaceService,
     private readonly messageStore: IMessageStore,
     private readonly compressionStrategy: ICompressionStrategy,
@@ -126,14 +147,11 @@ export class PersistentSessionContext implements ISessionContext {
 
     // 一次性构建所有 DTO，避免 getter 中的延迟计算和缓存逻辑
     this.modelConfig = this.buildModelConfig(model, prep.mergedSettings);
-    this.systemPromptParts = {
-      base: prep.mergedSettings.systemPrompt || "",
-      tool: prep.toolPrompts || "",
-    };
     this.thinkingEffortValue = prep.features.includes("thinking")
       ? prep.mergedSettings.thinkingEffort || "off"
       : undefined;
-    this.toolRuntime = prep.toolRuntime;
+    this.resolvedPlugins = prep.resolvedPlugins;
+    this.mergedSettings = prep.mergedSettings;
     this.toolApprovalConfig = this.buildToolApprovalConfig();
     this.memoryConfig = await this.buildMemoryConfig(
       prep.mergedSettings.memory,
@@ -150,7 +168,7 @@ export class PersistentSessionContext implements ISessionContext {
    * - 对 Kimi 模型做空 content 兼容处理
    * - 计算 system prompt 和初始消息的 Token 计数（用于后续增量更新）
    */
-  private async loadConversationState(): Promise<void> {
+  private async loadMessages(): Promise<void> {
     this.logger.log(`Initializing conversation state for ${this.sessionId}`);
 
     const modelConfig = this.modelConfig;
@@ -161,6 +179,7 @@ export class PersistentSessionContext implements ISessionContext {
     const checkpoint = await this.compressionStrategy.getCheckpoint(
       this.sessionId,
     );
+    this.loadedCheckpoint = checkpoint;
 
     const modelName = modelConfig.modelName || modelConfig.name || "";
     const isDeepSeekV4 = modelName.includes("deepseek-v4");
@@ -189,9 +208,6 @@ export class PersistentSessionContext implements ISessionContext {
       : { messages: rawMessages, summary: undefined };
 
     this.history = preprocessResult.messages;
-    if (preprocessResult.summary) {
-      this.systemPromptParts.summary = preprocessResult.summary;
-    }
 
     // reasoning content 处理
     if (shouldLoadReasoning) {
@@ -254,40 +270,64 @@ export class PersistentSessionContext implements ISessionContext {
 
     this.logger.debug(`Loaded ${this.history.length} messages into context`);
 
-    // 计算系统提示词的 Token 数
-    this.systemPromptTokenCount = await this.tokenizerService.countTextTokens(
-      modelName,
-      this.getSystemPrompt(),
-    );
-    // compressionConfig.contextWindow -= this.systemPromptTokenCount;
+    // compressionConfig.contextWindow -= this.tokenBreakdown.total;
 
-    // 初始化时计算全量 Token 数并缓存
-    this.currentTokenCount = await this.tokenizerService.countTokens(
+    // 初始化时计算历史消息 Token 数并缓存
+    this.tokenBreakdown.history = await this.tokenizerService.countTokens(
       modelName,
       this.history,
     );
-    this.logger.debug(`Initial token count: ${this.currentTokenCount}`);
+    this.logger.debug(
+      `Initial history token count: ${this.tokenBreakdown.history}`,
+    );
   }
 
   /**
    * 获取准备发送给 LLM 的完整消息列表。
    *
-   * 在首次调用时触发懒加载（loadConversationState），后续复用缓存的历史数据。
+   * 在首次调用时触发懒加载（loadMessages），后续复用缓存的历史数据。
    * 每次调用前会检查是否达到压缩阈值，若达到则自动执行压缩策略。
+   *
+   * @warning 禁止在插件中调用，否则会导致无限递归
    *
    * @returns 包含 system prompt 和对话历史的消息数组，可直接传递给 LLM API
    */
   async getMessages(options?: {
     exclude?: string[];
   }): Promise<MessageRecord[]> {
+    // 懒加载用户消息
+    if (!this.messagesLoaded) {
+      await this.loadMessages();
+      this.messagesLoaded = true;
+    }
+
     if (!this.conversationStateLoaded) {
-      await this.loadConversationState();
+      this.preludeParts = await this.buildPreludeMessages();
       this.conversationStateLoaded = true;
     }
 
     // 压缩由外部（AgentEngine）通过 shouldCompress/compress 控制，
     // getMessages 仅负责组装消息，不再触发压缩
-    return this.buildFinalMessages(this.history, options);
+    return [...this.preludeParts, ...this.history];
+  }
+
+  /**
+   * 获取原始的对话历史消息列表（不含 system prompt / 摘要 / 插件提示词）。
+   *
+   * 与 getMessages() 的区别：
+   * - getMessages() 返回完整消息列表（含 system prompt），禁止在插件中调用
+   * - getHistory() 只返回 raw conversation messages，可在插件中安全使用
+   *
+   * 仅在消息已加载时返回；若未加载（如插件在初始化阶段调用）则返回空数组，
+   * 避免触发 loadMessages 带来副作用。
+   */
+  async getHistory(): Promise<MessageRecord[]> {
+    // 仅在消息已加载时返回，避免意外触发 loadMessages
+    // （插件在 getMessages→collectPrompts 流程中调用时，消息一定已加载）
+    if (!this.messagesLoaded) {
+      return [];
+    }
+    return [...this.history];
   }
 
   /**
@@ -307,9 +347,9 @@ export class PersistentSessionContext implements ISessionContext {
       records,
     );
     await this.messageStore.persistContent(records);
-    this.currentTokenCount += newTokens;
+    this.tokenBreakdown.history += newTokens;
     this.logger.debug(
-      `Appended ${records.length} messages, added ${newTokens} tokens, total: ${this.currentTokenCount}`,
+      `Appended ${records.length} messages, added ${newTokens} tokens, history: ${this.tokenBreakdown.history}`,
     );
   }
 
@@ -338,7 +378,7 @@ export class PersistentSessionContext implements ISessionContext {
   }
 
   getTokenCount(): number {
-    return this.currentTokenCount + this.systemPromptTokenCount;
+    return calcTotalTokens(this.tokenBreakdown);
   }
 
   /**
@@ -347,13 +387,14 @@ export class PersistentSessionContext implements ISessionContext {
    * 将 contextWindow 临时设置为当前 Token 数，确保 shouldCompress 判断通过。
    * 压缩完成后恢复原始 contextWindow。
    */
-  async compress(onStage2?: () => Promise<void>): Promise<MessageRecord[]> {
-    if (!this.conversationStateLoaded) {
-      await this.loadConversationState();
-      this.conversationStateLoaded = true;
+  async compress(
+    onBeforeCompaction?: () => Promise<void>,
+  ): Promise<MessageRecord[]> {
+    if (!this.messagesLoaded) {
+      throw new Error("Messages not loaded yet");
     }
 
-    const currentTokens = this.currentTokenCount;
+    const currentTokens = this.tokenBreakdown.history;
     const memoryConfig = this.memoryConfig;
     const modelConfig = this.modelConfig;
     const chatModelName = modelConfig.modelName || modelConfig.name || "gpt4";
@@ -367,13 +408,11 @@ export class PersistentSessionContext implements ISessionContext {
       this.logger.log(
         `Skipping compression: ${currentTokens} tokens <= target ${targetTokens}`,
       );
-      return this.buildFinalMessages(this.history);
+      return await this.getMessages();
     }
 
     const compressionConfig: CompressionConfig = {
-      contextWindow: currentTokens,
-      triggerRatio: memoryConfig.compressionTriggerRatio ?? 0.8,
-      targetRatio: memoryConfig.compressionTargetRatio ?? 0.5,
+      targetTokens,
       model: this.compressionModel,
       summaryMode: (memoryConfig.summaryMode || SummaryMode.DEFAULT) as any,
       chatModelName,
@@ -383,69 +422,43 @@ export class PersistentSessionContext implements ISessionContext {
       this.sessionId,
       this.history,
       compressionConfig,
-      this.currentTokenCount,
-      onStage2,
+      this.tokenBreakdown,
+      onBeforeCompaction,
+      this.loadedCheckpoint,
     );
 
+    // 更新缓存的 checkpoint，后续压缩直接复用无需查库
+    if (result.checkpoint) {
+      this.loadedCheckpoint = result.checkpoint;
+    }
+
     this.history = result.messages;
-    if (result.summary) {
-      this.systemPromptParts.summary = result.summary;
-    }
-
     if (result.tokenCount !== undefined) {
-      this.currentTokenCount = result.tokenCount;
-      this.logger.log(
-        `Force compression completed with strategy: ${result.strategy}, token count: ${result.tokenCount}`,
-      );
-    } else {
-      this.logger.log(
-        `Force compression completed with strategy: ${result.strategy}`,
-      );
+      this.tokenBreakdown.history = result.tokenCount;
     }
 
-    return this.buildFinalMessages(result.messages);
+    this.logger.log(
+      `Force compression completed with strategy: ${result.strategy}, ` +
+        `tokens: history=${this.tokenBreakdown.history}, sys=${this.tokenBreakdown.systemPrompt}, summary=${this.tokenBreakdown.summary}`,
+    );
+    this.conversationStateLoaded = false;
+    return await this.getMessages();
   }
 
   /**
    * 检查是否达到压缩阈值。
    *
-   * 通过 compressionStrategy.shouldCompress 判断当前 Token 数是否达到阈值。
-   * 由 AgentEngine 在每轮循环前调用，决定是否进入 shadow_save 或 compress 状态。
+   * 直接根据当前 Token 总数与上下文窗口的比例判断，不再委托给压缩引擎。
    */
   async shouldCompress(): Promise<boolean> {
     const memoryConfig = this.memoryConfig;
-    const modelConfig = this.modelConfig;
-    const chatModelName = modelConfig.modelName || modelConfig.name || "gpt4";
-
-    const config: CompressionConfig = {
-      contextWindow: this.effectiveContextWindow - this.systemPromptTokenCount,
-      triggerRatio: memoryConfig.compressionTriggerRatio ?? 0.8,
-      targetRatio: memoryConfig.compressionTargetRatio ?? 0.5,
-      chatModelName,
-    };
-
-    return this.compressionStrategy.shouldCompress(
-      this.history,
-      config,
-      this.currentTokenCount,
+    const total = calcTotalTokens(this.tokenBreakdown);
+    const ratio = total / this.effectiveContextWindow;
+    const triggerRatio = memoryConfig.compressionTriggerRatio ?? 0.8;
+    this.logger.debug(
+      `Token stats: ${total}/${this.effectiveContextWindow} (${(ratio * 100).toFixed(1)}%), trigger at ${triggerRatio}`,
     );
-  }
-
-  private buildFinalMessages(
-    messages: MessageRecord[],
-    options?: { exclude?: string[] },
-  ): MessageRecord[] {
-    const nonSystemMessages = messages.filter((msg) => msg.role !== "system");
-
-    const finalSystemPrompt = this.getSystemPrompt(options?.exclude).replace(
-      "{time}",
-      new Date().toISOString(),
-    );
-
-    return [
-      { role: "system" as const, content: finalSystemPrompt },
-      ...nonSystemMessages,
-    ];
+    return ratio >= triggerRatio;
   }
 
   private buildModelConfig(
@@ -479,12 +492,16 @@ export class PersistentSessionContext implements ISessionContext {
         ...(model.config || {}),
         // 二级链：会话设置（创建时已从角色继承）> 模型默认 > undefined（API自行决策）
         temperature:
-          mergedSettings.modelTemperature ??
+          mergedSettings.model.temperature ??
           model.config?.temperature ??
           undefined,
-        topP: mergedSettings.modelTopP ?? model.config?.topP ?? undefined,
+        topP:
+          mergedSettings.model.topP ??
+          model.config?.modelTopP ??
+          model.config?.topP ??
+          undefined,
         frequencyPenalty:
-          mergedSettings.modelFrequencyPenalty ??
+          mergedSettings.model.frequencyPenalty ??
           model.config?.frequencyPenalty ??
           undefined,
       },
@@ -590,15 +607,12 @@ export class PersistentSessionContext implements ISessionContext {
   private async prepareSessionData(): Promise<{
     model: any;
     mergedSettings: MergedSettings;
-    toolPrompts: string;
     effectiveContextWindow: number;
     thinkingEffort: string | undefined;
-    toolRuntime: ToolRuntime | undefined;
+    resolvedPlugins: ResolvedPluginInfo[];
+    pluginsConfig: any;
     features: string[];
   }> {
-    const sessionId = this.sessionId;
-    const userId = this.userId;
-
     const model = await this.resolveModel();
 
     const merged = this.mergeSettings();
@@ -606,52 +620,17 @@ export class PersistentSessionContext implements ISessionContext {
     const features = model?.config?.features || [];
     const supportsTools = features.includes("tools");
 
-    // 注入工具提示词
-    let toolPrompts = "";
-    let toolRuntime: ToolRuntime | undefined;
+    let resolvedPlugins: ResolvedPluginInfo[] = [];
+    let pluginsConfig: any = undefined;
 
     if (supportsTools) {
-      const injectParams: PluginContext = {
-        sessionId,
-        userId,
-        sessionType: this.sessionType,
-        workspacePath: this._workspacePath,
-        model,
-        tools: merged.tools,
-        skillConfig: merged.skills,
-      };
-
-      toolRuntime = await this.toolOrchestrator.buildToolRuntime(injectParams);
-
-      // 从 PluginManager 收集 eager 提示词（传入角色配置做二次过滤）
-      const promptPieces =
-        await this.pluginManager.collectPrompts(injectParams);
-      const allParts: string[] = [];
-      for (const p of promptPieces) {
-        if (p.content) allParts.push(p.content);
-      }
-      // console.log(promptPieces);
-      // 懒加载 ToolSet 的激活词
-      const activators =
-        await this.pluginManager.getToolActivators(injectParams);
-      if (activators.length > 0) {
-        // console.log(activators);
-        allParts.push(
-          [
-            "# 可用工具集",
-            "你可以使用以下工具集：",
-            "",
-            ...activators,
-            "",
-            "---",
-          ].join("\n"),
-        );
-        allParts.push(
-          "## 使用原则\n1. **避免重复**...\n2. **仅描述不加载**...\n3. **执行调用**...",
-        );
-      }
-
-      toolPrompts = allParts.join("\n\n");
+      // 一次决议
+      const resolved = await this.pluginManager.resolvePlugins(
+        this,
+        merged.plugins,
+      );
+      resolvedPlugins = resolved;
+      pluginsConfig = merged.plugins;
     }
 
     const effectiveContextWindow = this.calcEffectiveContextWindow(
@@ -666,10 +645,10 @@ export class PersistentSessionContext implements ISessionContext {
     return {
       model,
       mergedSettings: merged,
-      toolPrompts,
       effectiveContextWindow,
       thinkingEffort,
-      toolRuntime,
+      resolvedPlugins,
+      pluginsConfig,
       features,
     };
   }
@@ -688,81 +667,32 @@ export class PersistentSessionContext implements ISessionContext {
     const sessionSettings = this.session.settings || {};
     const characterSettings = this.session.character?.settings || {};
 
-    // 团队模式：从主理人获取角色设置
-    let leaderSettings = characterSettings;
-    if (this.session.team?.leader?.settings) {
-      leaderSettings = this.session.team.leader.settings;
-    }
-
-    // 工具配置：会话设置优先于角色设置
-    let mergedTools = sessionSettings.tools ?? leaderSettings.tools;
-    const mergedMcpServers =
-      sessionSettings.mcpServers ?? leaderSettings.mcpServers;
-    // 合并 MCP 配置到 tools（MCP 本质是 tools 的一种）
-    if (mergedMcpServers) {
-      if (typeof mergedTools === 'object' && !Array.isArray(mergedTools)) {
-        mergedTools = { ...mergedTools, mcp: mergedMcpServers };
-      } else if (mergedTools === true) {
-        mergedTools = { mcp: mergedMcpServers };
-      }
-    }
-    const mergedSkills = sessionSettings.skills ?? leaderSettings.skills;
+    // 插件配置：会话设置优先于角色设置
+    const mergedTools = sessionSettings.plugins ?? characterSettings.plugins;
+    const mergedSkills = sessionSettings.skills ?? characterSettings.skills;
+    const mergedAgents = sessionSettings.agents ?? characterSettings.agents;
 
     // 系统提示词组装
     let systemPrompt =
-      sessionSettings.systemPrompt || leaderSettings.systemPrompt || "";
-
-    // 团队模式：拼接团队成员信息到提示词
-    if (this.session.team) {
-      const team = this.session.team;
-      // const leader = team.leader;
-      const members = team.members || [];
-
-      // 从主理人获取基础提示词
-      const leaderPrompt = leaderSettings.systemPrompt || "";
-      if (leaderPrompt) {
-        systemPrompt = leaderPrompt;
-      }
-
-      // 拼接团队成员信息
-      const memberInfos = members
-        .filter((m: any) => m.role !== "leader" && m.character)
-        .map((m: any) => {
-          const c = m.character;
-          return `- ID: ${c.id}, 名称: ${c.title}${c.description ? `, 描述: ${c.description}` : ""}`;
-        });
-
-      if (memberInfos.length > 0) {
-        const teamPromptParts = [
-          "",
-          "# 团队成员",
-          `你是团队 "${team.name}" 的主理人，你的任务是协调和分配任务。当需求和以下的团队成员能力匹配的时候，*你必须加载subagent能力*，使用对应的角色ID创建子代理，并分配任务：`,
-          ...memberInfos,
-        ];
-        systemPrompt = teamPromptParts.join("\n") + systemPrompt;
-      }
-    }
+      sessionSettings.systemPrompt || characterSettings.systemPrompt || "";
 
     const merged: MergedSettings = {
       systemPrompt,
       thinkingEffort: undefined,
       memory: {},
-      // 模型参数：从 settings.model 对象读取（遵循 modelOverrideEnabled 控制）
-      ...(sessionSettings.modelOverrideEnabled && sessionSettings.model
-        ? {
-            modelTemperature: sessionSettings.model.temperature ?? undefined,
-            modelTopP: sessionSettings.model.topP ?? undefined,
-            modelFrequencyPenalty:
-              sessionSettings.model.frequencyPenalty ?? undefined,
-          }
-        : {
-            modelTemperature: undefined,
-            modelTopP: undefined,
-            modelFrequencyPenalty: undefined,
-          }),
-      tools: mergedTools,
+      model: {},
+      plugins: mergedTools,
       skills: mergedSkills,
+      agents: mergedAgents,
     };
+
+    if (sessionSettings.modelOverrideEnabled && sessionSettings.model) {
+      merged.model = {
+        temperature: sessionSettings.model?.temperature,
+        topP: sessionSettings.model?.topP,
+        frequencyPenalty: sessionSettings.model?.frequencyPenalty,
+      };
+    }
 
     // 记忆/压缩配置（独立继承）
     const memoryEnabled = sessionSettings.memoryEnabled;
@@ -803,6 +733,76 @@ export class PersistentSessionContext implements ISessionContext {
     return model;
   }
 
+  private async buildPreludeMessages(): Promise<MessageRecord[]> {
+    const systemPrompts: string[] = [this.mergedSettings.systemPrompt];
+    const userPrompts: string[] = [];
+
+    // 分别计算系统提示词和摘要的 Token 数
+    const modelName = this.modelConfig.modelName || this.modelConfig.name || "";
+
+    if (this.loadedCheckpoint?.summaryContent) {
+      const summaryPrompt = `[CONTEXT COMPACTION — REFERENCE ONLY]\n${this.loadedCheckpoint.summaryContent}\n[CONTEXT COMPACTION — REFERENCE ONLY END]`;
+      userPrompts.push(summaryPrompt);
+      this.tokenBreakdown.summary = await this.tokenizerService.countTextTokens(
+        modelName,
+        summaryPrompt,
+      );
+    }
+
+    // 每次调用时动态搜集插件提示词，因为插件可能在运行时加载
+    const modePlugins = this.getResolvedPlugins();
+    if (modePlugins.length > 0) {
+      // eager → system prompt
+      const promptPieces = await this.promptCollector.collectPrompts(
+        modePlugins,
+        { session: this },
+      );
+      systemPrompts.push(
+        promptPieces
+          .map((p) => p.content)
+          .filter(Boolean)
+          .join("\n\n"),
+      );
+
+      // user → user 消息（如工具包记忆）
+      const userPieces = await this.promptCollector.collectUserPrompts(
+        modePlugins,
+        { session: this },
+      );
+      const userContent = userPieces
+        .map((p) => p.content)
+        .filter(Boolean)
+        .join("\n\n");
+      if (userContent) {
+        userPrompts.push(userContent);
+      }
+
+      this.tokenBreakdown.userPrompt =
+        await this.tokenizerService.countTextTokens(modelName, userContent);
+    }
+
+    const result: MessageRecord[] = [];
+
+    if (systemPrompts.length > 0) {
+      result.push({
+        role: "system",
+        content: systemPrompts.map((p) => p).join("\n\n"),
+      } as MessageRecord);
+    }
+    this.tokenBreakdown.systemPrompt = await this.tokenizerService.countTokens(
+      modelName,
+      result.filter((p) => p.role === "system"),
+    );
+    if (userPrompts.length > 0) {
+      result.push({
+        role: "user",
+        content: userPrompts.map((p) => p).join("\n\n"),
+      } as MessageRecord);
+    }
+
+    return result;
+  }
+
   getModelConfig(): ModelConfig {
     return this.modelConfig;
   }
@@ -811,23 +811,32 @@ export class PersistentSessionContext implements ISessionContext {
     return this.modelConfig.config.features?.includes(feature) || false;
   }
 
-  getSystemPrompt(exclude?: string[]): string {
-    const order = ["base", "tool", "summary"];
-    const filtered = exclude?.length
-      ? order.filter((k) => !exclude.includes(k))
-      : order;
-    return filtered
-      .map((k) => this.systemPromptParts[k])
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
   getThinkingEffort(): string | undefined {
     return this.thinkingEffortValue;
   }
 
-  getToolContext(): ToolRuntime | undefined {
-    return this.toolRuntime;
+  // === 运行模式 ===
+
+  getRunMode(): SessionRunMode {
+    return this.runMode;
+  }
+
+  async setRunMode(mode: SessionRunMode): Promise<void> {
+    this.logger.debug(`Switching run mode: ${this.runMode} -> ${mode}`);
+    this.runMode = mode;
+  }
+
+  /**
+   * 获取已决议的插件列表。
+   */
+  getResolvedPlugins(): ResolvedPluginInfo[] {
+    return this.resolvedPlugins;
+  }
+
+  /** 获取合并后的会话设置（指定字段或全部） */
+  getSettings(field?: string): any {
+    if (field) return (this.mergedSettings as any)[field];
+    return this.mergedSettings;
   }
 
   getToolApprovalConfig(): ToolApprovalConfig {
@@ -864,6 +873,10 @@ export class PersistentSessionContext implements ISessionContext {
     if (!this.tokenTracker) {
       this.tokenTracker = new SessionTokenTracker(this._workspacePath);
     }
-    await this.tokenTracker.addUsage(promptTokens, completionTokens, cachedTokens);
+    await this.tokenTracker.addUsage(
+      promptTokens,
+      completionTokens,
+      cachedTokens,
+    );
   }
 }

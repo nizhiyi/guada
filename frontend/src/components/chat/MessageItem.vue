@@ -13,10 +13,10 @@
               type="assistant" :name="displayName"></Avatar>
             <span class="text-[1.3em] text-gray-700 dark:text-gray-300 font-medium leading-tight mr-2">{{
               displayName
-            }}</span>
+              }}</span>
             <span v-if="currentModelName && currentModelName !== 'unknown'" class="text-[1em] text-gray-400 mt-0.5">{{
               currentModelName
-            }}</span>
+              }}</span>
           </div>
         </div>
       </div>
@@ -38,7 +38,7 @@
                   </div>
                   <div class="system-message-divider" />
                   <div class="system-message-body">
-                    <span v-html="renderSkillBadges(item.content || '')"></span>
+                    <span v-html="item.content || ''"></span>
                   </div>
                 </template>
                 <span v-else v-html="renderSkillBadges(item.content || '')"></span>
@@ -51,12 +51,12 @@
             <!-- 折叠头部（仅当 isCollapsible 时显示） -->
             <div v-if="group.isCollapsible && !(streamingState.isStreaming && groupIndex === displayGroups.length - 1)"
               class="process-group__header" @click="toggleGroup(group.id)">
-              <el-icon size="14" class="process-group__arrow" :class="{ 'is-expanded': isGroupExpanded(group.id) }">
+              <span class="process-group__title">
+                调用了 {{ countToolCalls(group.items) }} 个工具
+              </span> <el-icon size="14" class="process-group__arrow"
+                :class="{ 'is-expanded': isGroupExpanded(group.id) }">
                 <ArrowRightTwotone />
               </el-icon>
-              <span class="process-group__title">
-                中间处理过程 ({{ group.items.length }} 个步骤)
-              </span>
             </div>
 
             <!-- 展开内容 -->
@@ -72,7 +72,8 @@
                   :metadata="item.source.metadata" @click="handleThinkingClick" />
                 <!-- tool -->
                 <MessageToolCalls v-if="item.type === 'tool'" :tool-calls="item.toolCalls || []"
-                  :tool-responses="item.toolResponses" :is-streaming="item.source.state?.isStreaming || false"
+                  :tool-responses="item.toolResponses"
+                  :is-executing="streamingState.isStreaming && !item.toolResponses?.length"
                   :content-id="item.source.id" />
               </template>
             </div>
@@ -90,7 +91,7 @@
             <template #title v-if="metadata.finishReason === 'max_iterations_reached'">
               <span>已达到最大工具调用轮次限制</span>
             </template>
-            <div class="flex items-center gap-3 mt-2">
+            <div v-if="isLast" class="flex items-center gap-3 mt-2">
               <el-button type="primary" size="small" @click="handleContinue">
                 继续执行
               </el-button>
@@ -197,7 +198,7 @@ import { Alert16Regular } from "@vicons/fluent";
 import { FileItem, Avatar } from "../ui";
 import { usePopup } from "../../composables/usePopup";
 import { formatTime } from '../../utils';
-import { getCurrentTurns, getContentVersions, groupContentsForDisplay, type DisplayGroup } from '@/utils/messageUtils';
+import { getCurrentTurns, getContentVersions, groupContentsForDisplay, countToolCalls, type DisplayGroup } from '@/utils/messageUtils';
 import { getModelDisplayName, getModelAvatarPath } from '@/utils/modelUtils';
 
 // 导入拆分后的子组件
@@ -387,22 +388,23 @@ const displayName = computed(() => {
 });
 
 /**
- * 将纯文本中的 <skill:xxx> 标记转换为 HTML 徽标
- * 其余文本进行 HTML 转义，防止 XSS
+ * 将纯文本中的 [/type:name label="xxx"] 或 [@type:name label="xxx"] 标记
+ * 转换为 HTML 徽标，其余文本进行 HTML 转义防止 XSS
  */
 const renderSkillBadges = (text: string): string => {
   if (!text) return text;
-  // 先转义所有 HTML 特殊字符
+  // 先转义 HTML 特殊字符（不转义 " '，避免破坏标签内的 label="xxx"）
   const escaped = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#x27;');
-  // 再将转义后的 &lt;skill:xxx&gt; 替换为安全的徽标 HTML
+    .replace(/>/g, '&gt;');
+  // 再将转义后的 [/type:name ...] 替换为 HTML 徽标
   return escaped.replace(
-    /&lt;skill:([^&]+)&gt;/g,
-    '<span data-type="skill" data-skill-name="$1" class="skill-badge" style="color: var(--el-color-primary);">/$1</span>'
+    /\[([\/@])([a-zA-Z][\w\-\/]*):([\w-]+)(?:\s+label="([^"]*)")?\s*\]/g,
+    (_, prefix, provider, name, label) => {
+      const displayText = label || `${prefix}${name}`;
+      return `<span data-type="command" data-provider-id="${provider}" data-name="${name}" data-label="${label || ''}" data-trigger="${prefix}" class="command-badge" style="color: var(--el-color-primary);">${displayText}</span>`;
+    }
   );
 };
 
@@ -586,7 +588,8 @@ defineExpose({
   padding: 5px 12px;
   border-radius: 16px;
   border: 1px solid var(--color-bubble-user-border);
-  margin-left: auto;
+  /* margin-left: auto; */
+  /* max-width: 80%; */
 }
 
 /* AI消息气泡特定样式 - BEM Modifier */
@@ -611,7 +614,8 @@ defineExpose({
 }
 
 .message-item.message-item--user .message-item__wrapper {
-  align-items: flex-start;
+  align-items: flex-end;
+  max-width: 80%;
 }
 
 .message-item.message-item--assistant .message-item__wrapper {
@@ -692,9 +696,8 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 4px 0;
   border-radius: 6px;
-  background-color: var(--el-fill-color-light);
   color: var(--el-text-color-secondary);
   font-size: 13px;
   cursor: pointer;
@@ -702,9 +705,12 @@ defineExpose({
   user-select: none;
 }
 
-.process-group__header:hover {
-  background-color: var(--el-fill-color);
+:deep(.process-group__body .process-section:last-child .process-timeline) {
+  display: none;
 }
+
+/* .process-group__header:hover {
+} */
 
 /* 箭头图标 */
 .process-group__arrow {

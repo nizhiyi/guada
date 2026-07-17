@@ -403,28 +403,35 @@ export class ChatRunnerService {
   }
 
   /**
-   * 从会话队列中移除匹配指定条件的消息
+   * 从会话队列中查找并移除匹配指定条件的消息
    *
-   * 适用于 waitForComplete 等场景：已通过其他方式获取了消息内容，
+   * 适用于 waitForComplete、poll 撤回等场景：已通过其他方式获取了消息内容，
    * 需要从队列中移除以防止 processQueue 再次消费导致重复。
    *
    * @param sessionId 会话 ID
-   * @param predicate 匹配条件函数，返回 true 的消息将被移除
-   * @returns 被移除的消息数量
+   * @param predicate 匹配条件函数，返回 true 的消息将被移除并返回
+   * @returns 被移除的消息数组
    */
-  removeQueuedMessage(
+  peekQueuedMessage(
     sessionId: string,
     predicate: (item: QueueItem) => boolean,
-  ): number {
+  ): QueueItem[] {
     const state = this.queues.get(sessionId);
-    if (!state || state.items.length === 0) return 0;
+    if (!state || state.items.length === 0) return [];
 
-    const before = state.items.length;
-    state.items = state.items.filter((item) => !predicate(item));
-    const removed = before - state.items.length;
+    const removed: QueueItem[] = [];
+    const kept: QueueItem[] = [];
+    for (const item of state.items) {
+      if (predicate(item)) {
+        removed.push(item);
+      } else {
+        kept.push(item);
+      }
+    }
+    state.items = kept;
 
-    if (removed > 0) {
-      this.logger.log(`从队列中移除了 ${removed} 条消息: ${sessionId}`);
+    if (removed.length > 0) {
+      this.logger.log(`从队列中移除了 ${removed.length} 条消息: ${sessionId}`);
     }
 
     // 清理空状态
@@ -475,10 +482,16 @@ export class ChatRunnerService {
     const mergedSystemPayload = items.flatMap(
       (item) => item.source?.systemPayload || [],
     );
+    // 合并 parseResult：取最后一个（最新）有 parseResult 的 source
+    const lastParseResult = [...items]
+      .reverse()
+      .find((item) => item.source?.parseResult)
+      ?.source?.parseResult;
     const mergedSource = {
       ...firstItem.source,
       systemPayload:
         mergedSystemPayload.length > 0 ? mergedSystemPayload : undefined,
+      parseResult: lastParseResult || undefined,
       queueItemCount: items.length,
       queueItemIds: items.map((item) => item.id),
       queuedAt: firstItem.createdAt.toISOString(),
@@ -544,6 +557,7 @@ export class ChatRunnerService {
     clientId?: string,
   ): Promise<void> {
     const sessionId = session.id;
+    let lastFinishReason: string | undefined;
     try {
       // 构建类型安全的会话上下文（已包含对话状态）
       const sessionContext =
@@ -559,6 +573,10 @@ export class ChatRunnerService {
       );
 
       for await (const chunk of iterator) {
+        // 捕获最后一次 finishReason，用于 finally 判断是否跳过队列处理
+        if ((chunk as any).finishReason) {
+          lastFinishReason = (chunk as any).finishReason;
+        }
         this.streamManager.broadcast(sessionId, chunk as EventChunk);
       }
 
@@ -611,8 +629,14 @@ export class ChatRunnerService {
         throw error;
       }
     } finally {
-      // Agent循环结束后（成功、取消、异常），统一触发队列消费
-      await this.processQueue(sessionId);
+      // 队列消息等待暂停态（max_iterations / approval / rate_limited）由用户操作触发 resume 后处理，不自动消费
+      if (
+        lastFinishReason !== "max_iterations_reached" &&
+        lastFinishReason !== "approval_required" &&
+        lastFinishReason !== "rate_limited"
+      ) {
+        await this.processQueue(sessionId);
+      }
     }
   }
 }

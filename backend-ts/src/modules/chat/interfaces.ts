@@ -17,9 +17,8 @@ export interface MessageLoadParams {
 }
 
 export interface CompressionConfig {
-  contextWindow: number; // 实际生效的上下文窗口（已考虑 maxTokensLimit 限制）
-  triggerRatio: number;
-  targetRatio: number;
+  /** 压缩目标 Token 数（压缩后历史应不超过此值） */
+  targetTokens: number;
   model?: any;
   summaryMode?: SummaryMode; // 摘要生成模式，默认为 MEMORY_SYNC
   chatModelName?: string; // 对话模型名称，用于 Token 计算
@@ -41,6 +40,19 @@ export interface CompressionStats {
   afterMessageCount?: number;     // 压缩后的消息数
 }
 
+/** 细粒度 Token 统计：系统提示词 / 摘要 / 用户提示 / 对话消息 */
+export interface TokenBreakdown {
+  systemPrompt: number;   // base + plugins tokens
+  summary: number;        // summary 内容（含包裹标记）的 tokens
+  userPrompt: number;     // user 内容（含包裹标记）的 tokens
+  history: number;        // user/assistant 对话消息 tokens
+}
+
+/** 计算 TokenBreakdown 的总和 */
+export function calcTotalTokens(b: TokenBreakdown): number {
+  return b.systemPrompt + b.summary + b.userPrompt + b.history;
+}
+
 export interface CompressionResult {
   messages: MessageRecord[];      // 纯对话消息,不含 system 角色
   summary?: string;                // 生成的摘要内容(如果执行了压缩)
@@ -48,6 +60,7 @@ export interface CompressionResult {
   strategy?: string;
   tokenCount?: number;
   compressionStats?: CompressionStats; // 压缩统计信息
+  checkpoint?: CompressionCheckpoint;  // 本次压缩后最新的断点（可缓存复用，避免重复查库）
 }
 
 export interface CompressionCheckpoint {
@@ -84,13 +97,13 @@ export interface IMessageStore {
 // ============================================================================
 
 export interface ICompressionStrategy {
-  shouldCompress(messages: MessageRecord[], config: CompressionConfig, cachedTokenCount?: number): Promise<boolean>;
   execute(
     sessionId: string,
     messages: MessageRecord[],
     config: CompressionConfig,
-    currentTokenCount?: number, // 当前缓存的 Token 数，避免重复计算
-    onStage2?: () => Promise<void>, // 二级压缩（摘要/丢弃）前的回调
+    tokenBreakdown?: TokenBreakdown,   // 细粒度 Token 统计，替代 currentTokenCount
+    onBeforeCompaction?: () => Promise<void>,    // 二级压缩（摘要/丢弃）前的回调
+    checkpoint?: CompressionCheckpoint | null, // 已加载的断点，避免内部重复查库
   ): Promise<CompressionResult>;
   getCheckpoint(sessionId: string): Promise<CompressionCheckpoint | null>;
   preprocess(

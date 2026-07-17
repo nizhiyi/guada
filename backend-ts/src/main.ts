@@ -1,4 +1,5 @@
 import { NestFactory } from "@nestjs/core";
+import { ValidationPipe } from "@nestjs/common";
 import { WinstonModule } from 'nest-winston';
 import { AppModule } from "./app.module";
 import { AllExceptionsFilter } from "./common/filters/all-exceptions.filter";
@@ -10,6 +11,13 @@ import * as path from "path";
 import * as fs from "fs";
 
 async function bootstrap() {
+  // 修正工作目录到 backend-ts 根目录，确保 bundled-skills/、skills/ 等路径可预测
+  const backendRoot = path.resolve(__dirname, '..');
+  if (process.cwd() !== backendRoot) {
+    process.chdir(backendRoot);
+    console.log(`工作目录已修正: ${backendRoot}`);
+  }
+
   // 确定日志目录（优先使用环境变量 LOGS_DIR）
   const logsDir = process.env.LOGS_DIR || path.join(process.cwd(), 'logs');
   
@@ -73,6 +81,15 @@ async function bootstrap() {
 
   app.useGlobalFilters(new AllExceptionsFilter());
   app.useGlobalInterceptors(new RequestTimingInterceptor());
+
+  // 全局 ValidationPipe：whitelist=true 自动剔除 DTO 未声明的字段
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+    }),
+  );
+
   app.enableCors(); // Enable CORS for frontend integration
 
   // 支持通过环境变量 PORT 指定端口，若未指定则使用 0 让系统自动分配可用端口

@@ -5,6 +5,7 @@ import { AuthGuard } from "../auth/auth.guard";
 import { Public } from "../auth/public.decorator";
 import { ToolOrchestrator } from "../tools/tool-orchestrator.service";
 import { PluginManager } from "../plugins/plugin.manager";
+import { SG_PLUGINS } from "../../constants/settings.constants";
 
 @Controller()
 export class SettingsController {
@@ -77,18 +78,6 @@ export class SettingsController {
     return this.settingsService.getSettings();
   }
 
-  /**
-   * 获取全局工具列表
-   */
-  @Public()
-  @Get("settings/plugins/global")
-  async getGlobalTools() {
-    const allTools = await this.toolOrchestrator.getLocalToolsList();
-
-    return {
-      tools: allTools,
-    };
-  }
 
   /**
    * 获取全局工作目录基路径
@@ -124,9 +113,9 @@ export class SettingsController {
   async updateGlobalToolStatus(@Body() data: { pluginId: string; enabled: boolean }) {
     const { pluginId, enabled } = data;
 
-    // 持久化全局配置
-    await this.settingsService.updateGroupSettings('plugins', {
-      [pluginId]: enabled,
+    // 持久化全局配置（新格式 PluginEntryConfig）
+    await this.settingsService.updateGroupSettings(SG_PLUGINS, {
+      [pluginId]: { enabled },
     });
 
     // 同步运行时状态（触发 onLoad/onUnload）

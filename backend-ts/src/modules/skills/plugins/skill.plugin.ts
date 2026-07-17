@@ -1,22 +1,20 @@
 import { Injectable, Logger } from "@nestjs/common";
-import * as path from "path";
 import { z } from "zod";
 import { PluginBase } from "../../plugins/base-plugin";
 import { PluginContext } from "../../plugins/types/plugin.types";
 import { SkillOrchestrator } from "../core/skill-orchestrator.service";
 import { PluginApi } from "../../plugins/api/plugin-api";
+import path from "path";
 
 @Injectable()
 export class SkillPlugin extends PluginBase {
   private readonly logger = new Logger(SkillPlugin.name);
-  private readonly skillsDir =
-    process.env.SKILLS_DIR || path.join(process.cwd(), "skills");
   manifest = {
     id: "skill",
     name: "Skills 技能",
     description: "技能系统的管理工具",
     version: "1.0.0",
-    category: "core" as const,
+    category: "system" as const,
   };
 
   constructor(private orchestrator: SkillOrchestrator) {
@@ -24,123 +22,125 @@ export class SkillPlugin extends PluginBase {
   }
 
   async onLoad(api: PluginApi) {
-    api.registerToolSet({
-      name: "skill",
-      loadMode: "eager",
-      activator: "当需要管理或调用技能时使用 tool_load 加载技能管理工具",
-    });
-
-    api.registerTool({
-      name: "skill_scan",
-      toolSet: "skill",
-      description:
-        "Scan the skills directory to discover new or updated skills. Use this when you need to refresh the list of available skills.",
-      inputSchema: z.object({}),
-      execute: async () => {
-        try {
-          const result = await this.orchestrator.triggerScan();
-          return `Scan completed successfully. Found ${result.added.length} new skills, ${result.updated.length} updated, ${result.removed.length} removed.`;
-        } catch (error: any) {
-          return `Scan failed: ${error.message}`;
-        }
+    // ── 注册斜杠命令提供者（含解析器） ──
+    api.registerCommandProvider({
+      id: "skill",
+      trigger: "slash",
+      fetchItems: () => {
+        const skills = this.orchestrator.listSkills(true);
+        return skills.map((s) => ({
+          name: s.manifest?.name || s.id,
+          description: s.manifest?.description || "",
+          label: s.manifest?.name || s.id,
+        }));
       },
-      display: { action: "扫描技能", icon: "search" },
+      parse: (attrs) => {
+        const name = attrs.name || "unknown";
+
+        const allSkills = this.orchestrator.listSkills(true);
+        const skill = allSkills.find(
+          (s) => (s.manifest?.name || s.id) === name,
+        );
+        if (skill) {
+          const skillName = skill.manifest?.name || skill.id || name;
+          const desc = skill.manifest?.description || "";
+          const replacement = `\`skill:${skillName}\``;
+          if (desc) {
+            return {
+              replacement,
+              appendix: `---skill:${skillName}---\nndescription:${desc}`,
+            };
+          }
+        }
+        return undefined;
+      },
     });
 
-    api.registerTool({
-      name: "skill_reload",
-      toolSet: "skill",
+    const skillKit = api.registerToolKit({
+      id: "skill",
+      name: "Skill Instructions",
+      loadMode: "eager",
+      activator: "Call this toolkit to get the full instructions for a skill when you need to use one",
+      handler: async (ctx: PluginContext) => {
+        const skills = this.orchestrator.listSkills(
+          true,
+          ctx?.session.workspacePath,
+        );
+        if (skills.length === 0) return { loadMode: "none" as const };
+        return { loadMode: "eager" as const };
+      },
+    });
+
+    // ── skill_lean：获取技能完整指令 ──
+    skillKit.registerTool({
+      name: "skill_lean",
       description:
-        "Reload a specific skill to apply changes. Use this after modifying a skill's SKILL.md file. If you changed the skill name (directory name), use scan instead.",
+        "通过技能名称获取技能的完整指令内容和路径。技能内容已去除 YAML 元数据头，可直接使用",
       inputSchema: z.object({
-        skillId: z.string().describe("The ID (name) of the skill to reload"),
+        name: z
+          .string()
+          .describe("技能名称（SKILL.md frontmatter 中定义的 name 字段）"),
       }),
       execute: async (args) => {
-        if (!args.skillId) return "Error: skillId parameter is required";
-        try {
-          const normalizedSkillId = args.skillId.toLowerCase();
-          const updatedSkill =
-            await this.orchestrator.reloadSkill(normalizedSkillId);
-          return `Successfully reloaded skill: ${updatedSkill.manifest.name} (version ${updatedSkill.manifest.version})`;
-        } catch (error: any) {
-          return `Failed to reload skill ${args.skillId}: ${error.message}`;
+        const result = await this.orchestrator.skillLean(args.name);
+        if (!result) {
+          return { success: false, message: `技能 "${args.name}" 不存在` };
         }
+        return {
+          success: true,
+          name: result.name,
+          content: result.content,
+          path: result.path,
+        };
       },
-      display: { action: "重新加载技能", argsKey: "skillId", icon: "edit" },
+      display: { action: "读取技能", argsKey: "name", icon: "book" },
+      dangerLevel: "info",
     });
 
-    api.registerTool({
-      name: "skill_call",
-      toolSet: "skill",
-      description:
-        "Call a specific skill to activate it and get its complete instructions. This will return the full SKILL.md content that you must follow to complete the task.",
-      inputSchema: z.object({
-        skillName: z.string().describe("The name of the skill to call"),
-      }),
-      execute: async (args, ctx) => {
-        if (!args.skillName) return "Error: skillName parameter is required";
-        try {
-          const normalizedSkillName = args.skillName.toLowerCase();
-          const skill = this.orchestrator.getSkillDetail(normalizedSkillName);
-          if (!skill) return `Skill '${args.skillName}' not found.`;
-          const content = await this.orchestrator.getSkillDocumentation(normalizedSkillName);
-          return [
-            `# Skill: ${skill.manifest.name}`,
-            "",
-            `**Path**: ${skill.basePath}/SKILL.md`,
-            "",
-            "---",
-            "",
-            content || "(No content available)",
-          ].join("\n");
-        } catch (error: any) {
-          return `Failed to get skill info for ${args.skillName}: ${error.message}`;
-        }
-      },
-      display: { action: "调用技能", argsKey: "skillName", icon: "generic" },
-    });
-
-    // 动态技能列表提示词（每次收集时从 orchestrator 读取当前技能）
-    api.registerPrompt({
-      toolSet: "skill",
-      frequency: "VOLATILE",
-      description: "可用技能列表及使用指南",
+    // ── Prompt（toolkit 的 prompt 随 loadMode 自动注入/隐藏）──
+    skillKit.registerPrompt({
+      frequency: "REGULAR",
+      description: "可用技能列表",
       content: (context: PluginContext) => {
-        const allSkills = this.orchestrator.listSkills(true);
-        if (allSkills.length === 0) return "";
+        const allSkills = this.orchestrator.listSkills(
+          true,
+          context?.session.workspacePath,
+        );
 
-        // 按角色级偏好过滤（角色未配置的项继承全局，即保留）
-        const charSkillCfg = context?.skillConfig;
-        const skills = charSkillCfg
-          ? allSkills.filter(s => charSkillCfg[s.id] !== false)
-          : allSkills;
+        // 按角色级偏好过滤
+        const charSkillCfg = context?.session.getSettings?.("skills");
+        let skills: any[];
+        if (charSkillCfg === false) {
+          skills = [];
+        } else if (typeof charSkillCfg === "object" && charSkillCfg !== null) {
+          if (charSkillCfg.__default === false) {
+            // 白名单模式：只保留显式 enabled: true 的技能
+            skills = allSkills.filter((s: any) => charSkillCfg[s.id] === true);
+          } else {
+            // 黑名单模式：排除显式 enabled: false 的技能
+            skills = allSkills.filter((s: any) => charSkillCfg[s.id] !== false);
+          }
+        } else {
+          skills = allSkills;
+        }
         if (skills.length === 0) return "";
 
-        const metadataList = skills
-          .map((s: any) => `- ${s.manifest.name}: ${s.manifest.description}`)
+        const skillList = skills
+          .map((s) => `- ${s.manifest.name}: ${s.manifest.description}`)
           .join("\n");
 
         return [
           "",
-          "# Available Skills",
-          "You have access to the following professional skills. When a user request matches a skill's capability, you should proactively read and apply that skill:",
+          "# Skills",
           "",
-          metadataList,
+          "You have access to the following skills. Each skill has a name and description.",
+          "When a user's request matches a skill's description, use the `skill_learn` tool to load the full",
+          "SKILL.md file from its location to get complete instructions. Do not guess the skill's",
+          "behavior — always read the file first.",
           "",
-          "## Skills Directory",
-          `User skills are stored in: ${this.skillsDir}`,
-          `System built-in skills are stored in: ${this.skillsDir}/.system/`,
-          "",
-          "## Important: Skills List Already Provided",
-          "The complete list of available skills is shown above. You do NOT need to call any tool to get the skills list.",
-          "When asked about available skills, simply refer to the list provided in this prompt.",
-          "",
-          "## How to Use Skills",
-          "When you identify that a skill is relevant to the current task:",
-          '1. Call the skill using: skill_call({ skillName: "skill-name" })',
-          "2. The tool will activate the skill and return its complete SKILL.md instructions",
-          "3. Carefully follow all instructions and guidelines in the returned content",
-          "4. Apply the skill's methodology to complete the task",
+          "<available_skills>",
+          skillList,
+          "</available_skills>",
         ].join("\n");
       },
     });

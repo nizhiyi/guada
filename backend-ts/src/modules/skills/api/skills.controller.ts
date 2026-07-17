@@ -9,6 +9,7 @@ import { SkillMetadataValidator } from '../common/skill-metadata.validator';
 import { ConfigService } from '@nestjs/config';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import * as os from 'os';
 import AdmZip from 'adm-zip';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -80,7 +81,7 @@ export class SkillsController {
     // 直接读取原始 SKILL.md 文件内容
     const fs = await import('fs/promises');
     const path = await import('path');
-    const skillMdPath = path.join(skill.basePath, 'SKILL.md');
+    const skillMdPath = path.join(skill.baseDir, skill.basePath, 'SKILL.md');
     const rawContent = await fs.readFile(skillMdPath, 'utf-8');
 
     return { content: rawContent };
@@ -90,9 +91,14 @@ export class SkillsController {
    * 触发手动扫描
    */
   @Post('scan')
-  async triggerScan(): Promise<SkillDiscoveryResult> {
+  async triggerScan(): Promise<{ success: boolean; message: string }> {
     this.logger.log('Manual scan triggered');
-    return this.orchestrator.triggerScan();
+    try {
+      await this.orchestrator.triggerScan();
+      return { success: true, message: 'Scan completed' };
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
   }
 
   /**
@@ -201,7 +207,7 @@ export class SkillsController {
 
       // 生成临时目录名
       const tempDirName = `skill-git-${Date.now()}`;
-      const tempDir = path.join(process.cwd(), 'temp', tempDirName);
+      const tempDir = path.join(os.tmpdir(), tempDirName);
       await fs.mkdir(tempDir, { recursive: true });
 
       this.logger.log(`Cloning skill from Git: ${url}`);
@@ -353,7 +359,7 @@ export class SkillsController {
 
       // 创建临时目录
       const tempDirName = `skill-url-${Date.now()}`;
-      const tempDir = path.join(process.cwd(), 'temp', tempDirName);
+      const tempDir = path.join(os.tmpdir(), tempDirName);
       await fs.mkdir(tempDir, { recursive: true });
 
       // 下载 ZIP 文件
@@ -421,7 +427,7 @@ export class SkillsController {
       }
 
       // 检查是否是 Git 仓库
-      const gitDir = path.join(skill.basePath, '.git');
+      const gitDir = path.join(skill.baseDir, skill.basePath, '.git');
       try {
         await fs.access(gitDir);
       } catch {
@@ -432,7 +438,7 @@ export class SkillsController {
 
       // 执行 git pull
       await execAsync('git pull', { 
-        cwd: skill.basePath,
+        cwd: path.join(skill.baseDir, skill.basePath),
         timeout: 30000 
       });
 
@@ -471,7 +477,7 @@ export class SkillsController {
       const force = body?.force === true || String(body?.force) === 'true';
 
       // 创建临时目录解压
-      const tempDir = path.join(process.cwd(), 'temp', `skill-install-${Date.now()}`);
+      const tempDir = path.join(os.tmpdir(), `skill-install-${Date.now()}`);
       await fs.mkdir(tempDir, { recursive: true });
 
       // 保存 ZIP 文件
@@ -532,7 +538,7 @@ export class SkillsController {
       }
 
       // 删除技能目录
-      await fs.rm(skill.basePath, { recursive: true, force: true });
+      await fs.rm(path.join(skill.baseDir, skill.basePath), { recursive: true, force: true });
 
       // 触发扫描以更新注册表
       await this.orchestrator.triggerScan();

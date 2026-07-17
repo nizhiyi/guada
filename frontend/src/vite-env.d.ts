@@ -76,6 +76,7 @@ interface ElectronAPI {
   }
   getAppInfo: () => Promise<any>
   showNotification: (title: string, body: string) => Promise<void>
+  migrateData: () => Promise<{ success: boolean; message: string }>
   minimizeWindow: () => void
   maximizeWindow: () => void
   closeWindow: () => void
@@ -89,6 +90,8 @@ interface ElectronAPI {
   openUserDataFolder: () => void
   openInstallFolder: () => void
   openFolder: (folderPath: string) => Promise<void>
+  showItemInFolder: (filePath: string) => Promise<{ success: boolean }>
+  openWithEditor: (targetPath: string, editor: string) => Promise<{ success: boolean; error?: string }>
   
   // 窗口管理（新 API - 浏览器自动化窗口）
   createBrowserWindow: (url?: string, metadata?: Record<string, any>) => Promise<{ success: boolean; window?: any }>
@@ -104,6 +107,12 @@ interface ElectronAPI {
   showBrowserWindow: (windowId: string) => Promise<{ success: boolean }>
   toggleBrowserWindowVisibility: (windowId: string) => Promise<{ success: boolean; isVisible?: boolean }>
   getBrowserWindowVisibility: (windowId: string) => Promise<{ success: boolean; isVisible?: boolean }>
+  
+  // 托盘悬浮窗统计推送
+  updateTrayStats: (stats: { running: number; unread: number }) => void
+  
+  // 托盘悬浮窗配置（显隐 + 透明度）
+  updateTraySettings: (settings: { enabled: boolean; opacity: number }) => void
   
   // 调试菜单
   showDebugMenu: () => Promise<void>

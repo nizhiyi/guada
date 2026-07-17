@@ -1,17 +1,22 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { SkillDiscoveryService } from './skill-discovery.service';
-import { SkillRegistry } from './skill-registry.service';
-import { SkillLoaderService } from './skill-loader.service';
-import { SkillVersionManager } from './skill-version-manager.service';
-import { SkillDefinition } from '../interfaces/skill-manifest.interface';
-import { SkillDiscoveryResult } from '../interfaces/index';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from "@nestjs/common";
+import * as path from "path";
+import { SkillSourceManager } from "./skill-source.manager";
+import { SkillRegistry } from "./skill-registry.service";
+import { SkillLoaderService } from "./skill-loader.service";
+import { SkillVersionManager } from "./skill-version-manager.service";
+import { SkillDefinition } from "../interfaces/skill-manifest.interface";
 
 /**
  * Skill 匹配结果
  */
 export interface SkillMatch {
   skillId: string;
-  confidence: number; // 0-1 匹配度
+  confidence: number;
   reason: string;
 }
 
@@ -20,104 +25,57 @@ export class SkillOrchestrator implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SkillOrchestrator.name);
 
   constructor(
-    private discovery: SkillDiscoveryService,
+    private sourceManager: SkillSourceManager,
     private registry: SkillRegistry,
     private loader: SkillLoaderService,
     private versionManager: SkillVersionManager,
   ) {}
 
-  /**
-   * 模块初始化时自动扫描
-   */
   async onModuleInit(): Promise<void> {
-    this.logger.log('Initializing Skills framework...');
+    this.logger.log("Initializing Skills framework...");
     try {
-      await this.discovery.scan();
-      this.logger.log(`Skills framework initialized with ${this.registry.getAll().size} skills`);
+      // 由 SkillsModule.onModuleInit 先调用 watcher.start() 和 sourceManager.start()
+      const n = this.registry.getAll().size;
+      this.logger.log(`Skills framework initialized with ${n} skills`);
     } catch (error) {
       this.logger.error(`Failed to initialize Skills framework: ${error}`);
     }
   }
 
   async onModuleDestroy(): Promise<void> {
-    this.logger.log('Shutting down Skills framework...');
+    this.logger.log("Shutting down Skills framework...");
   }
 
   /**
-   * 手动触发扫描
+   * 重新触发全量扫描（现有 system + global 来源重新加载）
    */
-  async triggerScan(): Promise<SkillDiscoveryResult> {
-    return this.discovery.scan();
+  async triggerScan(): Promise<void> {
+    this.logger.log("Triggering manual scan...");
+    // 重新注册 system + global，更新 registry
+    await this.sourceManager.restart();
   }
 
   /**
-   * 获取 L1 元数据注入文本（用于 System Prompt）
-   * 仅包含 Skills 列表，详细说明由 SkillToolBridge 通过 getPrompt 提供
+   * 列出所有 Skills，支持按工作目录合并 workspace skills。
+   * 优先级：workspace > global > system。
    */
-  getMetadataInjection(): string {
-    const skills = Array.from(this.registry.getAll().values());
-    
-    if (skills.length === 0) {
-      return '';
-    }
+  listSkills(filterEnabled = true, workspacePath?: string): SkillDefinition[] {
+    // system + global（来自 Registry，按 enabled 过滤）
+    const base = filterEnabled
+      ? this.registry.getEnabled()
+      : Array.from(this.registry.getAll().values());
 
-    const metadataList = skills.map(skill => 
-      `- ${skill.manifest.name}: ${skill.manifest.description}`
-    ).join('\n');
+    if (!workspacePath) return base;
 
-    return `\n\n# Available Skills\nThe following professional skills are available. Use the skill management tools to interact with them:\n\n${metadataList}`;
-  }
+    // workspace 技能（来自 SourceManager 独立缓存）
+    const wsKey = "workspace_" + workspacePath;
+    const wsSkills = this.sourceManager.getSourceSkills(wsKey);
+    if (wsSkills.length === 0) return base;
 
-  /**
-   * 获取 L2 指令注入文本（激活时加载）
-   */
-  async getInstructionInjection(skillId: string): Promise<string> {
-    const skill = this.registry.get(skillId);
-    if (!skill) {
-      throw new Error(`Skill ${skillId} not found`);
-    }
-
-    const instructions = await this.loader.loadInstructions(skill);
-    
-    return `\n\n## Active Skill: ${skill.manifest.name}\n${instructions}`;
-  }
-
-  /**
-   * 根据用户消息匹配相关 Skills（简单关键词匹配，可扩展为 Embedding）
-   */
-  async matchSkills(userMessage: string): Promise<SkillMatch[]> {
-    const skills = Array.from(this.registry.getAll().values());
-    const matches: SkillMatch[] = [];
-
-    for (const skill of skills) {
-      const keywords = [
-        skill.manifest.name,
-        ...(skill.manifest.tags || []),
-      ];
-
-      const lowerMessage = userMessage.toLowerCase();
-      const matchedKeywords = keywords.filter(kw => 
-        lowerMessage.includes(kw.toLowerCase())
-      );
-
-      if (matchedKeywords.length > 0) {
-        matches.push({
-          skillId: skill.id,
-          confidence: matchedKeywords.length / keywords.length,
-          reason: `Matched keywords: ${matchedKeywords.join(', ')}`,
-        });
-      }
-    }
-
-    return matches.sort((a, b) => b.confidence - a.confidence);
-  }
-
-  /**
-   * 列出所有 Skills
-   */
-  listSkills(filterEnabled = true): SkillDefinition[] {
-    if (filterEnabled) return this.registry.getEnabled();
-    return Array.from(this.registry.getAll().values());
+    const merged = new Map<string, SkillDefinition>();
+    for (const s of base) merged.set(s.id, s);
+    for (const s of wsSkills) merged.set(s.id, s); // 同名覆盖
+    return Array.from(merged.values());
   }
 
   /**
@@ -151,9 +109,21 @@ export class SkillOrchestrator implements OnModuleInit, OnModuleDestroy {
     if (!skill) {
       throw new Error(`Skill ${skillId} not found`);
     }
-
-    // 直接加载并返回指令内容
     return await this.loader.loadInstructions(skill);
+  }
+
+  /**
+   * 通过名称获取技能内容（纯正文，不含 YAML 头）和路径
+   * 供 skill_lean 工具调用
+   */
+  async skillLean(
+    name: string,
+  ): Promise<{ name: string; content: string; path: string } | null> {
+    const skill = this.registry.get(name.toLowerCase());
+    if (!skill) return null;
+    const content = await this.loader.loadInstructions(skill);
+    const fullPath = path.join(skill.baseDir, skill.basePath, "SKILL.md");
+    return { name: skill.manifest.name, content, path: fullPath };
   }
 
   /**
@@ -165,30 +135,28 @@ export class SkillOrchestrator implements OnModuleInit, OnModuleDestroy {
       throw new Error(`Skill ${skillId} not found`);
     }
 
-    // 重新解析 Manifest
     const updatedSkill = await this.loader.reloadManifest(skill);
-    
-    // 更新注册表
     this.registry.update(updatedSkill);
-    
-    // 记录版本更新（如果不存在则创建初始记录）
+
     if (updatedSkill.manifest.version) {
       try {
         await this.versionManager.recordUpdate(
           skillId,
           updatedSkill.manifest.version,
-          updatedSkill.contentHash
+          updatedSkill.contentHash,
         );
       } catch (error) {
-        // 如果版本记录不存在，创建初始记录
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (errorMessage.includes('not found in version records')) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes("not found in version records")) {
           await this.versionManager.recordInstall(
             skillId,
             updatedSkill.manifest.version,
-            updatedSkill.contentHash
+            updatedSkill.contentHash,
           );
-          this.logger.debug(`Created initial version record for skill: ${skillId}`);
+          this.logger.debug(
+            `Created initial version record for skill: ${skillId}`,
+          );
         } else {
           throw error;
         }
@@ -197,5 +165,46 @@ export class SkillOrchestrator implements OnModuleInit, OnModuleDestroy {
 
     this.logger.log(`Reloaded skill: ${skillId}`);
     return updatedSkill;
+  }
+
+  /**
+   * 根据用户消息匹配相关 Skills
+   */
+  async matchSkills(userMessage: string): Promise<SkillMatch[]> {
+    const skills = Array.from(this.registry.getAll().values());
+    const matches: SkillMatch[] = [];
+
+    for (const skill of skills) {
+      const keywords = [skill.manifest.name, ...(skill.manifest.tags || [])];
+
+      const lowerMessage = userMessage.toLowerCase();
+      const matchedKeywords = keywords.filter((kw) =>
+        lowerMessage.includes(kw.toLowerCase()),
+      );
+
+      if (matchedKeywords.length > 0) {
+        matches.push({
+          skillId: skill.id,
+          confidence: matchedKeywords.length / keywords.length,
+          reason: `Matched keywords: ${matchedKeywords.join(", ")}`,
+        });
+      }
+    }
+
+    return matches.sort((a, b) => b.confidence - a.confidence);
+  }
+
+  /**
+   * 列出所有 Skills（元数据注入用）
+   */
+  getMetadataInjection(): string {
+    const skills = Array.from(this.registry.getAll().values());
+    if (skills.length === 0) return "";
+
+    const metadataList = skills
+      .map((skill) => `- ${skill.manifest.name}: ${skill.manifest.description}`)
+      .join("\n");
+
+    return `\n\n# Available Skills\nThe following professional skills are available. Use the skill management tools to interact with them:\n\n${metadataList}`;
   }
 }

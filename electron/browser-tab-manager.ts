@@ -203,7 +203,18 @@ export class BrowserWindowManager {
             this.notifyWindowUpdate(windowId);
           }
           // 每次页面加载完成后重新注入反检测脚本
-          this.injectAntiDetectionScript(webviewWC);
+          // ⚠️ 跳过 chrome-error 内部页：在其上执行 JS 会触发 Chromium CHECK() 原生断言崩溃
+          const currentUrl = webviewWC.getURL();
+          if (
+            currentUrl &&
+            !currentUrl.startsWith("chrome-error://") &&
+            !currentUrl.startsWith("about:")
+          ) {
+            try {
+              if (!webviewWC.isDestroyed())
+                this.injectAntiDetectionScript(webviewWC);
+            } catch {}
+          }
         });
 
         // 监听加载失败
@@ -217,11 +228,39 @@ export class BrowserWindowManager {
             log.error(
               `Window ${windowId} webview failed to load: ${errorCode} - ${errorDescription}`,
             );
+            // 通知前端导航失败（含原始 URL 和错误详情）
+            if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+              this.mainWindow.webContents.send("window-navigation-error", {
+                windowId,
+                errorCode,
+                errorDescription,
+                url: webviewWC.getURL(),
+              });
+            }
+            // 导航到 about:blank 阻止 chrome-error 页加载——该页面在部分 Electron
+            // 版本中会触发原生层退出（exit code 3 / STATUS_BREAKPOINT）
+            if (
+              !webviewWC.isDestroyed() &&
+              webviewWC.getURL() !== "about:blank"
+            ) {
+              webviewWC.loadURL("about:blank").catch(() => {});
+            }
           },
         );
 
+
+        // 监听 webview 崩溃（Electron 30+ 使用 render-process-gone 替代 crashed）
+        (webviewWC as any).on("render-process-gone", (_event: any, details: any) => {
+          log.error(
+            `Window ${windowId} webview render process gone, reason=${details?.reason}, exitCode=${details?.exitCode}`,
+          );
+        });
+
+        // 监听 webview 意外销毁（已销毁的 webContents 无法再触发事件，isDestroyed() 才是可靠检查）
+        log.info(`Window ${windowId} webview webContentsId: ${webviewWC.id}`);
+
         // 注入反检测脚本
-        this.injectAntiDetectionScript(webviewWC);
+        try { if (!webviewWC.isDestroyed()) this.injectAntiDetectionScript(webviewWC); } catch {}
 
         // 为 webview 设置右键菜单
         this.setupContextMenu(webviewWC, windowId);
@@ -390,6 +429,37 @@ export class BrowserWindowManager {
   }
 
   /**
+   * 等待并获取指定窗口的 webview WebContents（实际加载页面的内容）
+   * 用于新窗口刚创建时，webview 可能尚未 attach，等待后再返回
+   * 超时返回 null，不会回退到外壳页面
+   */
+  async getWebviewWebContents(
+    windowId: string,
+    timeoutMs: number = 10000,
+  ): Promise<WebContents | null> {
+    const win = this.windows.get(windowId);
+    if (!win) return null;
+    if (win.webviewWebContents && !win.webviewWebContents.isDestroyed()) {
+      return win.webviewWebContents;
+    }
+
+    // 等待 did-attach-webview 设置 webviewWebContents
+    const pollInterval = 50;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, pollInterval));
+      const w = this.windows.get(windowId);
+      if (w?.webviewWebContents && !w.webviewWebContents.isDestroyed()) {
+        return w.webviewWebContents;
+      }
+    }
+    log.warn(
+      `getWebviewWebContents: webview not attached for window ${windowId} after ${timeoutMs}ms`,
+    );
+    return null;
+  }
+
+  /**
    * 获取指定窗口的外壳 WebContents（用于外壳 IPC）
    */
   getShellWebContents(windowId: string): WebContents | null {
@@ -403,18 +473,27 @@ export class BrowserWindowManager {
    */
   getWindowIdByWebContentsId(webContentsId: number): string | null {
     for (const [windowId, win] of this.windows.entries()) {
-      if (
-        !win.shellWebContents.isDestroyed() &&
-        win.shellWebContents.id === webContentsId
-      ) {
-        return windowId;
+      try {
+        if (
+          win.shellWebContents &&
+          !win.shellWebContents.isDestroyed() &&
+          win.shellWebContents.id === webContentsId
+        ) {
+          return windowId;
+        }
+      } catch {
+        // shellWebContents 可能已处于无效状态
       }
-      if (
-        win.webviewWebContents &&
-        !win.webviewWebContents.isDestroyed() &&
-        win.webviewWebContents.id === webContentsId
-      ) {
-        return windowId;
+      try {
+        if (
+          win.webviewWebContents &&
+          !win.webviewWebContents.isDestroyed() &&
+          win.webviewWebContents.id === webContentsId
+        ) {
+          return windowId;
+        }
+      } catch {
+        // webviewWebContents 可能已处于无效状态
       }
     }
     return null;
@@ -563,6 +642,7 @@ export class BrowserWindowManager {
    * 注入反检测脚本，降低被封控识别的可能性
    */
   private injectAntiDetectionScript(webContents: WebContents): void {
+    if (webContents.isDestroyed()) return;
     const antiDetectionScript = `
       (function() {
         // 1. 移除 webdriver 标志

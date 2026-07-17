@@ -23,8 +23,9 @@ export class SessionManagementPlugin extends PluginBase {
   }
 
   async onLoad(api: PluginApi) {
-    api.registerToolSet({
-      name: "session",
+    const sessionKit = api.registerToolKit({
+      id: "session",
+      name: "会话管理",
       loadMode: "none",
       handler: (ctx: any) => ({
         loadMode:
@@ -32,15 +33,14 @@ export class SessionManagementPlugin extends PluginBase {
       }),
     });
 
-    api.registerTool({
+    sessionKit.registerTool({
       name: "clear_session",
-      toolSet: "session",
       description:
         "清空当前会话的所有消息历史，开始全新的对话。此操作会将当前会话归档，后续消息将创建新的会话。",
       inputSchema: z.object({ confirm: z.boolean() }),
       execute: async (args, ctx) => {
-        const sessionId = ctx?.sessionId;
-        const sessionType = ctx?.sessionType;
+        const sessionId = ctx?.session.sessionId;
+        const sessionType = ctx?.session?.sessionType;
         if (!sessionId) throw new Error("无法获取会话 ID");
         if (sessionType !== "bot")
           throw new Error("此工具仅在机器人会话中可用");
@@ -77,25 +77,24 @@ export class SessionManagementPlugin extends PluginBase {
       display: { action: "清空会话", icon: "chat" },
     });
 
-    api.registerPrompt({
-      toolSet: "session",
+    sessionKit.registerPrompt({
       frequency: "REGULAR",
       description: "会话管理工具使用说明",
       content: (context: PluginContext) => {
-        if (context.sessionType !== "bot") return "";
+        if (context.session.sessionType !== "bot") return "";
         return [
-          "# 会话管理工具",
+          "# Session Management Tools",
           "",
           "## clear_session",
-          "**用途**：清空当前会话的所有消息历史，开始全新的对话",
+          "**Purpose**: Clear all message history in the current session and start a fresh conversation",
           "",
-          "**何时使用**：",
-          '- 用户明确要求"清空聊天"、"重新开始"、"删除所有消息"',
-          "- 话题发生彻底转变，旧上下文不再相关",
+          "**When to use**:",
+          '- User explicitly asks to "clear chat", "start over", "delete all messages"',
+          "- The topic has completely shifted and the old context is no longer relevant",
           "",
-          "**注意事项**：",
-          "- 此操作不可撤销",
-          "- 调用前必须设置 confirm: true",
+          "**Important Notes**:",
+          "- This operation cannot be undone",
+          "- Must set confirm: true before calling",
         ].join("\n");
       },
     });

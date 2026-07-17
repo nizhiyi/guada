@@ -21,8 +21,8 @@ import {
 import { SessionContextFactory } from "./session-context.factory";
 import { FileWatcherService } from "../../common/services/file-watcher.service";
 import { SessionStreamManager } from "./session-stream.manager";
-import { TeamRepository } from "../../common/database/team.repository";
 import { SummaryMode } from "./compression-engine";
+import { resolveThinkingEffort } from "../llm-core";
 
 @Injectable()
 export class SessionService {
@@ -41,7 +41,6 @@ export class SessionService {
     private sessionContextFactory: SessionContextFactory,
     private fileWatcherService: FileWatcherService,
     private streamManager: SessionStreamManager,
-    private teamRepo: TeamRepository,
     private agentEngine: AgentEngine,
   ) {}
 
@@ -165,29 +164,18 @@ export class SessionService {
    * 创建新会话，支持从角色继承配置
    */
   async createSession(userId: string, data: any) {
-    const modelId = data.modelId;
-    const teamId = data.teamId;
-    const { title, settings, workspacePath } = data;
+    const { modelId, characterId, title, settings, workspacePath } = data;
 
-    // 团队模式：从团队获取主理人角色ID
-    let characterId = data.characterId;
-    let team = null;
-    if (teamId) {
-      team = await this.teamRepo.findById(teamId, false);
-      if (!team) {
-        throw new Error(`Team with ID ${teamId} not found`);
-      }
-      characterId = team.leaderCharacterId;
-    }
+    let mainCharacterId = characterId;
 
-    if (!characterId) {
+    if (!mainCharacterId) {
       throw new Error("characterId is required");
     }
 
     // 获取角色信息
-    const character = await this.characterRepo.findById(characterId, false);
+    const character = await this.characterRepo.findById(mainCharacterId, false);
     if (!character) {
-      throw new Error(`Character with ID ${characterId} not found`);
+      throw new Error(`Character with ID ${mainCharacterId} not found`);
     }
 
     // 处理会话设置：过滤非法字段 + 处理 memory 继承 + 继承角色模型参数
@@ -222,30 +210,18 @@ export class SessionService {
       finalWorkspacePath = await this.workspaceService.generateWorkspaceDir();
     }
 
-    // 团队模式：使用团队信息作为会话标题/头像/描述
-    let finalTitle = title || character.title;
-    let finalAvatarUrl = character.avatarUrl;
-    let finalDescription = character.description;
-    if (team) {
-      // 使用团队名称作为会话标题，团队头像作为会话头像
-      finalTitle = title || team.name;
-      finalAvatarUrl = team.avatarUrl || character.avatarUrl;
-      finalDescription = team.description || character.description;
-    }
-
     // 继承角色配置
     const sessionData = {
       userId,
-      characterId: teamId ? null : characterId,
-      title: finalTitle,
-      avatarUrl: finalAvatarUrl,
-      description: finalDescription,
+      characterId: mainCharacterId,
+      title: title || character.title,
+      avatarUrl: character.avatarUrl,
+      description: character.description,
       modelId: finalModelId,
       settings: filteredSettings,
       workspacePath: finalWorkspacePath,
       groupId: data.groupId || null,
-      teamId: teamId || null,
-      sessionType: teamId ? "team" : "web",
+      sessionType: "web",
     };
 
     const session = await this.sessionRepo.create(sessionData);
@@ -276,26 +252,11 @@ export class SessionService {
       sessionSettings = {};
     }
 
-    // 定义允许的顶层字段白名单
-    const allowedTopLevelFields = [
-      "thinkingEffort",
-      "referencedKbs",
-      "modelName",
-      "memoryEnabled",
-      "memory",
-      "modelOverrideEnabled",
-      "model",
-    ];
+    // 字段白名单已由控制器层的 ValidationPipe + SessionSettingsDto 处理，
+    // 此处直接使用传入的 settings 进行业务继承逻辑。
+    const filteredSettings = { ...sessionSettings };
 
-    // 第一步：过滤掉非法字段
-    const filteredSettings: any = {};
-    for (const key of allowedTopLevelFields) {
-      if (sessionSettings[key] !== undefined) {
-        filteredSettings[key] = sessionSettings[key];
-      }
-    }
-
-    // 第二步：处理 memory 分组的继承逻辑
+    // 第一步：处理 memory 分组的继承逻辑
     // 如果未开启自定义配置（memoryEnabled === false），则继承角色的 memory 配置
     if (filteredSettings.memoryEnabled === false) {
       filteredSettings.memory = characterSettings?.memory || null;
@@ -324,7 +285,8 @@ export class SessionService {
         filteredSettings.model = {
           temperature: characterSettings.modelTemperature ?? undefined,
           topP: characterSettings.modelTopP ?? undefined,
-          frequencyPenalty: characterSettings.modelFrequencyPenalty ?? undefined,
+          frequencyPenalty:
+            characterSettings.modelFrequencyPenalty ?? undefined,
         };
       } else {
         filteredSettings.modelOverrideEnabled = false;
@@ -546,7 +508,7 @@ export class SessionService {
         messages: [{ role: "user", content: prompt }],
         temperature: 0.3, // 较低的温度使输出更稳定
         maxTokens: 50, // 限制输出长度
-        thinkingEffort: "off", // 禁用思考功能
+        thinkingEffort: resolveThinkingEffort(model, "off"), // 禁用思考功能
         stream: false,
         providerConfig: model.provider,
       });
@@ -638,7 +600,10 @@ export class SessionService {
     // 检查会话是否正在流式输出，避免干扰工作流程
     if (this.streamManager.hasActiveStream(sessionId)) {
       throw new HttpException(
-        { error: "当前会话正在流式输出，请等待结束后再压缩", code: "SESSION_STREAMING" },
+        {
+          error: "当前会话正在流式输出，请等待结束后再压缩",
+          code: "SESSION_STREAMING",
+        },
         HttpStatus.CONFLICT,
       );
     }

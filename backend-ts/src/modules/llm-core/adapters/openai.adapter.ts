@@ -1,7 +1,13 @@
 import { Logger } from "@nestjs/common";
 import { OpenAI, APIError } from "openai";
+import * as path from "path";
+import * as fs from "fs";
 import { IProtocolAdapter } from "./base.adapter";
-import { ProviderConfig, ConnectionTestResult, RemoteModel } from "../types/provider.types";
+import {
+  ProviderConfig,
+  ConnectionTestResult,
+  RemoteModel,
+} from "../types/provider.types";
 import {
   MessageRecord,
   LLMCompletionParams,
@@ -9,6 +15,8 @@ import {
   ToolCallItem,
 } from "../types/llm.types";
 import { ToolDefinition } from "../../tools/interfaces/tool-provider.interface";
+import { removeOrphanSurrogates } from "../../../common/utils/string.utils";
+import { retryOn429 } from "../utils/retry.util";
 
 /**
  * 扩展 OpenAI 客户端，重写 makeStatusError 以保留完整 HTTP 响应体。
@@ -25,7 +33,8 @@ class BodyPreservingOpenAI extends OpenAI {
     // error 是完整的 errJSON（与 SDK 内部 APIError.generate 的第二个参数相同）
     // 保存到 __rawBody 供 extractErrorDetail 提取
     if (error) {
-      (err as any).__rawBody = typeof error === "object" ? JSON.stringify(error) : String(error);
+      (err as any).__rawBody =
+        typeof error === "object" ? JSON.stringify(error) : String(error);
     }
     return err;
   }
@@ -90,7 +99,9 @@ export class OpenAIAdapter implements IProtocolAdapter {
         owned_by: model.owned_by,
       }));
     } catch (error: any) {
-      this.logger.warn(`Failed to sync remote models (API may not support /v1/models): ${error.message}`);
+      this.logger.warn(
+        `Failed to sync remote models (API may not support /v1/models): ${error.message}`,
+      );
       return [];
     }
   }
@@ -142,6 +153,9 @@ export class OpenAIAdapter implements IProtocolAdapter {
     ) {
       // OpenAI 使用 reasoning_effort 参数
       requestParams.reasoning_effort = params.thinkingEffort;
+    } else if (params.thinkingEffort === "off") {
+      requestParams.reasoning_effort = undefined;
+      requestParams.thinking = { type: "disabled" };
     }
 
     // 流式模式下请求返回 usage 信息（OpenAI 标准要求显式声明）
@@ -149,7 +163,6 @@ export class OpenAIAdapter implements IProtocolAdapter {
     if (params.stream) {
       requestParams.stream_options = { include_usage: true };
     }
-
     return requestParams;
   }
 
@@ -177,9 +190,18 @@ export class OpenAIAdapter implements IProtocolAdapter {
     let response: any = null;
 
     try {
-      response = await client.chat.completions.create(requestParams, {
-        signal: params.abortSignal,
-      });
+      // 对 client.chat.completions.create 进行 429 指数退避重试
+      response = await retryOn429(
+        () =>
+          client.chat.completions.create(requestParams, {
+            signal: params.abortSignal,
+          }),
+        {
+          logger: this.logger,
+          context: `${this.constructor.name}.chatCompletion`,
+          abortSignal: params.abortSignal,
+        },
+      );
 
       if (params.stream) {
         yield* this.handleStreamResponse(response);
@@ -195,7 +217,14 @@ export class OpenAIAdapter implements IProtocolAdapter {
 
   private formatMessages(messages: MessageRecord[]) {
     return messages.map((msg) => {
-      const filtered: any = { role: msg.role, content: msg.content || "" };
+      const rawContent = msg.content || "";
+      const filtered: any = {
+        role: msg.role,
+        content:
+          typeof rawContent === "string"
+            ? removeOrphanSurrogates(rawContent)
+            : rawContent,
+      };
       if (msg.reasoningContent !== undefined)
         filtered.reasoning_content = msg.reasoningContent;
       if (msg.toolCallId !== undefined) filtered.tool_call_id = msg.toolCallId;
@@ -339,7 +368,9 @@ export class OpenAIAdapter implements IProtocolAdapter {
     try {
       const extraFields: Record<string, any> = {};
       for (const key of Object.getOwnPropertyNames(error)) {
-        if (!["stack", "message", "name", "status", "code", "type"].includes(key)) {
+        if (
+          !["stack", "message", "name", "status", "code", "type"].includes(key)
+        ) {
           const val = error[key];
           if (val !== undefined && val !== null) {
             extraFields[key] = typeof val === "object" ? val : String(val);
@@ -347,15 +378,21 @@ export class OpenAIAdapter implements IProtocolAdapter {
         }
       }
       if (Object.keys(extraFields).length > 0) {
-        this.logger.error(`LLM API error extra: ${JSON.stringify(extraFields).substring(0, 2000)}`);
+        this.logger.error(
+          `LLM API error extra: ${JSON.stringify(extraFields).substring(0, 2000)}`,
+        );
       }
-    } catch { /* ignore serialization errors */ }
+    } catch {
+      /* ignore serialization errors */
+    }
 
     if (error instanceof APIError) {
       const rawBody = (error as any).__rawBody;
       // 如果 SDK 显示 "(no body)" 但实际有 body，替换消息
       if (rawBody && error.message?.includes("(no body)")) {
-        throw new Error(`LLM API Error: ${error.status} - body=${rawBody.substring(0, 500)}`);
+        throw new Error(
+          `LLM API Error: ${error.status} - body=${rawBody.substring(0, 500)}`,
+        );
       }
       throw new Error(`LLM API Error: ${error.status} - ${error.message}`);
     }
@@ -437,7 +474,9 @@ export class OpenAIAdapter implements IProtocolAdapter {
  * - OpenAI 官方: usage.prompt_tokens_details.cached_tokens
  * - DeepSeek 风格: usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
  */
-function extractOpenAICachedTokens(rawUsage: any): { read?: number; missed?: number } | undefined {
+function extractOpenAICachedTokens(
+  rawUsage: any,
+): { read?: number; missed?: number } | undefined {
   const cachedTokens: { read?: number; missed?: number } = {};
 
   // DeepSeek 风格: usage.prompt_cache_hit_tokens (flat in usage)

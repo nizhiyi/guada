@@ -18,12 +18,19 @@ export const useLayoutStore = defineStore('layout', () => {
   // 工作目录分割比例（持久化，默认 pane1=75%, pane2=25%）
   const workspaceSplitSize = useStorage('workspaceSplitSize', 75)
 
+  // 工作目录预览模式分割比例（持久化，默认 pane1=50%, pane2=50%）
+  const workspacePreviewSplitSize = useStorage('workspacePreviewSplitSize', 50)
+
   // 壁纸与透明度设置（持久化到 localStorage）
   const wallpaperUrl = useStorage<string | null>('wallpaperUrl', null)
   const sidebarOpacity = useStorage<number>('sidebarOpacity', 100)
   const contentOpacity = useStorage<number>('contentOpacity', 100)
   const acrylicEnabled = useStorage<boolean>('acrylicEnabled', true)
   const blurRadius = useStorage<number>('blurRadius', 20)
+
+  // 悬浮任务窗设置（持久化到 localStorage）
+  const floatWidgetEnabled = useStorage<boolean>('floatWidgetEnabled', false)
+  const floatWidgetOpacity = useStorage<number>('floatWidgetOpacity', 95)
 
   // 防止重复加载壁纸的标志
   let isLoadingWallpaper = false
@@ -50,10 +57,17 @@ export const useLayoutStore = defineStore('layout', () => {
   }
 
   /**
-   * 设置工作目录分割比例
+   * 设置工作目录分割比例（目录模式）
    */
   const setWorkspaceSplitSize = (size: number): void => {
     workspaceSplitSize.value = size
+  }
+
+  /**
+   * 设置工作目录分割比例（预览模式）
+   */
+  const setWorkspacePreviewSplitSize = (size: number): void => {
+    workspacePreviewSplitSize.value = size
   }
 
   /**
@@ -89,6 +103,20 @@ export const useLayoutStore = defineStore('layout', () => {
    */
   const setBlurRadius = (radius: number): void => {
     blurRadius.value = radius
+  }
+
+  /**
+   * 设置悬浮任务窗显隐
+   */
+  const setFloatWidgetEnabled = (enabled: boolean): void => {
+    floatWidgetEnabled.value = enabled
+  }
+
+  /**
+   * 设置悬浮任务窗透明度
+   */
+  const setFloatWidgetOpacity = (opacity: number): void => {
+    floatWidgetOpacity.value = opacity
   }
 
   /**
@@ -186,8 +214,22 @@ export const useLayoutStore = defineStore('layout', () => {
       if (response.blurRadius !== undefined) {
         blurRadius.value = response.blurRadius
       }
+      if (response.floatWidgetEnabled !== undefined) {
+        floatWidgetEnabled.value = response.floatWidgetEnabled === true
+      }
+      if (response.floatWidgetOpacity !== undefined) {
+        floatWidgetOpacity.value = response.floatWidgetOpacity
+      }
 
       applyWallpaperSettings()
+
+      // 同步悬浮窗设置到 Electron 主进程
+      if (window.electronAPI) {
+        window.electronAPI.updateTraySettings({
+          enabled: floatWidgetEnabled.value,
+          opacity: floatWidgetOpacity.value,
+        })
+      }
     } catch (error) {
       console.error('加载外观设置失败:', error)
       // 使用本地存储的值作为回退
@@ -207,20 +249,26 @@ export const useLayoutStore = defineStore('layout', () => {
     sidebarVisible,
     workspaceVisible,
     workspaceSplitSize,
+    workspacePreviewSplitSize,
     wallpaperUrl,
     sidebarOpacity,
     contentOpacity,
     acrylicEnabled,
     blurRadius,
+    floatWidgetEnabled,
+    floatWidgetOpacity,
     toggleSidebar,
     setSidebarVisible,
     toggleWorkspace,
     setWorkspaceSplitSize,
+    setWorkspacePreviewSplitSize,
     setWallpaperUrl,
     setSidebarOpacity,
     setContentOpacity,
     setAcrylicEnabled,
     setBlurRadius,
+    setFloatWidgetEnabled,
+    setFloatWidgetOpacity,
     applyWallpaperSettings,
     loadAppearanceSettings,
   }

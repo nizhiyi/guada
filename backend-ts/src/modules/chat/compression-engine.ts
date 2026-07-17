@@ -8,9 +8,12 @@ import {
   CompressionConfig,
   CompressionResult,
   CompressionCheckpoint,
+  TokenBreakdown,
+  calcTotalTokens,
 } from "./interfaces";
 import { resolveThinkingEffort } from "../llm-core/utils/model-config.helper";
 import { EventBusService } from "../../common/events/event-bus.service";
+import { safeSubstring, safeTail } from "../../common/utils/string.utils";
 
 /**
  * 压缩配置常量
@@ -59,34 +62,6 @@ export class CompressionEngine implements ICompressionStrategy {
   ) {}
 
   /**
-   * 判断是否需要触发压缩
-   *
-   * 基于当前 Token 总数与上下文窗口的比例进行判断。
-   * 优先使用缓存的 Token 计数以避免重复计算开销。
-   *
-   * @param messages 待评估的消息列表
-   * @param config 压缩配置，包含上下文窗口和触发阈值（contextWindow 已是实际生效值）
-   * @param cachedTokenCount 可选的缓存 Token 计数，若提供则直接使用
-   * @returns 是否达到压缩触发条件
-   */
-  async shouldCompress(
-    messages: MessageRecord[],
-    config: CompressionConfig,
-    cachedTokenCount?: number,
-  ): Promise<boolean> {
-    // 优先使用缓存的 Token 计数，避免重复计算
-    const modelName = config.chatModelName || "gpt4";
-    const totalTokens =
-      cachedTokenCount ??
-      (await this.tokenizerService.countTokens(modelName, messages));
-    const ratio = totalTokens / config.contextWindow;
-    this.logger.debug(
-      `Token stats: ${totalTokens}/${config.contextWindow} (${(ratio * 100).toFixed(1)}%), trigger at ${config.triggerRatio}${cachedTokenCount ? " (cached)" : ""}`,
-    );
-    return ratio >= config.triggerRatio;
-  }
-
-  /**
    * 执行完整的压缩流程
    *
    * 该方法协调两阶段压缩策略的执行：先尝试轻量级的裁剪操作，若无法满足目标则升级为摘要压缩。
@@ -101,10 +76,11 @@ export class CompressionEngine implements ICompressionStrategy {
     sessionId: string,
     messages: MessageRecord[],
     config: CompressionConfig,
-    currentTokenCount?: number, // 当前缓存的 Token 数，避免重复计算
-    onStage2?: () => Promise<void>, // 二级压缩（摘要/丢弃）前的回调
+    tokenBreakdown?: TokenBreakdown, // 细粒度 Token 统计
+    onBeforeCompaction?: () => Promise<void>, // 二级压缩（摘要/丢弃）前的回调
+    checkpoint?: CompressionCheckpoint | null, // 已加载的断点，避免内部重复查库
   ): Promise<CompressionResult> {
-    const state = await this.contextStateRepo.findBySessionId(sessionId);
+    const state = checkpoint ?? null;
 
     const cleanMessages = messages.filter((msg) => msg.role !== "system");
 
@@ -114,13 +90,10 @@ export class CompressionEngine implements ICompressionStrategy {
       timestamp: new Date().toISOString(),
     });
 
-    // 记录压缩前的状态：优先使用传入的缓存 Token 数，避免实时计算的开销
-    const beforeTokenCount =
-      currentTokenCount ??
-      (await this.tokenizerService.countTokens(
-        config.chatModelName || "gpt4",
-        cleanMessages,
-      ));
+    // 记录压缩前的状态：使用传入的细粒度 Token 统计
+    const beforeTokenCount = tokenBreakdown
+      ? calcTotalTokens(tokenBreakdown)
+      : undefined;
     const beforeMessageCount = cleanMessages.length;
 
     this.logger.log("Executing Stage 1: Pruning");
@@ -132,7 +105,7 @@ export class CompressionEngine implements ICompressionStrategy {
       config.chatModelName || "gpt4",
       prunedMessages,
     );
-    const targetTokens = Math.floor(config.contextWindow * config.targetRatio);
+    const targetTokens = config.targetTokens;
 
     this.logger.debug(
       `After pruning: ${prunedTokens} tokens (target: ${targetTokens})`,
@@ -165,11 +138,6 @@ export class CompressionEngine implements ICompressionStrategy {
     if (prunedTokens > targetTokens) {
       this.logger.log("Pruning insufficient, triggering Stage 2: Compaction");
 
-      // 二级压缩前的回调（用于记忆保存等预处理）
-      if (onStage2) {
-        await onStage2();
-      }
-
       try {
         // 执行第二阶段：调用 LLM 生成摘要，将超出部分的历史对话浓缩为简洁概要
         const {
@@ -183,6 +151,7 @@ export class CompressionEngine implements ICompressionStrategy {
           prunedTokens,
           targetTokens,
           compressionState.summaryContent, // 直接使用压缩状态中的摘要内容
+          tokenBreakdown?.summary ?? 0, // 传递当前摘要 Token 数
           config.model,
           config.summaryMode ?? SummaryMode.DEFAULT,
           config.chatModelName, // 传递对话模型名称用于 Token 计算
@@ -196,6 +165,10 @@ export class CompressionEngine implements ICompressionStrategy {
           );
           // 保持默认的 pruned_only 策略，不更新结果变量
         } else {
+          // 二级压缩前的回调（用于记忆保存等预处理）
+          if (onBeforeCompaction) {
+            await onBeforeCompaction();
+          }
           // 成功生成摘要，更新结果为摘要模式
           resultMessages = retained;
           resultSummary = summary;
@@ -266,6 +239,7 @@ export class CompressionEngine implements ICompressionStrategy {
       strategy: compressionState.cleaningStrategy,
       tokenCount: resultTokenCount,
       compressionStats,
+      checkpoint: compressionState as CompressionCheckpoint,
     };
   }
 
@@ -298,62 +272,79 @@ export class CompressionEngine implements ICompressionStrategy {
 
     // 根据上次处理点的游标确定起始索引，跳过已经裁剪过的消息，实现增量处理
     let startIndex = 0;
-    if (lastProcessedContentId) {
-      const idx = messages.findIndex(
-        (m) => m.contentId === lastProcessedContentId,
-      );
-      if (idx !== -1) {
-        startIndex = idx + 1;
-      }
-    }
+    // if (lastProcessedContentId) {
+    //   const idx = messages.findIndex(
+    //     (m) => m.contentId === lastProcessedContentId,
+    //   );
+    //   if (idx !== -1) {
+    //     startIndex = idx + 1;
+    //   }
+    // }
 
     // 从后往前遍历消息列表，保护最近的 N 条工具结果不被裁剪
     // 倒序遍历确保最新的重要上下文得到优先保护
     for (let i = prunedMessages.length - 1; i >= startIndex; i--) {
       const msg = prunedMessages[i];
       if (msg.role === "tool") {
+        // 保护 tool_learn 结果不被裁剪（含工具定义XML，裁剪后AI将丢失工具使用说明）
+        if (msg.name === "tool_learn") {
+          continue;
+        }
+
         if (protectedCount < PROTECTED_RECENT_TOOL_RESULTS_COUNT) {
           protectedCount++;
           continue;
         }
 
         const content = typeof msg.content === "string" ? msg.content : "";
-        if (content.length > PRUNING_TOOL_RESULT_MAX_LENGTH) {
-          // 采用"头部+尾部"保留策略：各保留一半长度，中间用省略号替代
-          // 这样既减少了 Token 占用，又保留了工具结果的开头标识和结尾关键数据
+
+        // 采用"头部+尾部"保留策略：各保留一半长度，中间用省略号替代
+        // 这样既减少了 Token 占用，又保留了工具结果的开头标识和结尾关键数据
+        const pruneContext = () => {
+          if (msg.contentId < lastProcessedContentId) {
+            return "[tool result has been pruned due to age]";
+          }
+          if (content.length <= PRUNING_TOOL_RESULT_MAX_LENGTH) {
+            return undefined;
+          }
           const headLength = Math.floor(PRUNING_TOOL_RESULT_MAX_LENGTH / 2);
           const tailLength = PRUNING_TOOL_RESULT_MAX_LENGTH - headLength;
-          const prunedContent = `${content.substring(0, headLength)}...[omitted ${content.length - PRUNING_TOOL_RESULT_MAX_LENGTH} characters]...${content.substring(content.length - tailLength)}`;
+          const prunedContent = `${safeSubstring(content, 0, headLength)}...[omitted ${content.length - PRUNING_TOOL_RESULT_MAX_LENGTH} characters]...${safeTail(content, tailLength)}`;
+          return prunedContent;
+        };
 
-          // 记录裁剪元数据，用于后续恢复或调试；同时更新最后裁剪的 Content ID 游标
-          // 游标选择逻辑：确保记录的是消息列表中位置最靠后的被裁剪项
-          if (msg.contentId) {
-            metadata[msg.contentId] = {
-              contentId: msg.contentId,
-              messageId: msg.messageId,
-              originalLength: content.length,
-              prunedLength: prunedContent.length,
-              prunedContent: prunedContent,
-              prunedAt: new Date().toISOString(),
-            };
-            // 记录最后一个被裁剪的 ContentId
-            if (
-              !lastPrunedContentId ||
-              messages.findIndex((m) => m.contentId === msg.contentId) >
-                messages.findIndex((m) => m.contentId === lastPrunedContentId)
-            ) {
-              lastPrunedContentId = msg.contentId;
-            }
-          }
-
-          prunedMessages[i] = {
-            ...msg,
-            content: prunedContent,
-          };
-          this.logger.debug(
-            `Pruned tool result for message ${msg.messageId}, length: ${content.length} -> ${prunedContent.length}`,
-          );
+        const prunedContent = pruneContext();
+        if (!prunedContent) {
+          continue;
         }
+
+        // 记录裁剪元数据，用于后续恢复或调试；同时更新最后裁剪的 Content ID 游标
+        // 游标选择逻辑：确保记录的是消息列表中位置最靠后的被裁剪项
+
+        metadata[msg.contentId] = {
+          contentId: msg.contentId,
+          messageId: msg.messageId,
+          originalLength: content.length,
+          prunedLength: prunedContent.length,
+          prunedContent: prunedContent,
+          prunedAt: new Date().toISOString(),
+        };
+        // 记录最后一个被裁剪的 ContentId
+        if (
+          !lastPrunedContentId ||
+          messages.findIndex((m) => m.contentId === msg.contentId) >
+            messages.findIndex((m) => m.contentId === lastPrunedContentId)
+        ) {
+          lastPrunedContentId = msg.contentId;
+        }
+
+        prunedMessages[i] = {
+          ...msg,
+          content: prunedContent,
+        };
+        this.logger.debug(
+          `Pruned tool result for message ${msg.messageId}, length: ${content.length} -> ${prunedContent.length}`,
+        );
       }
     }
 
@@ -373,7 +364,7 @@ export class CompressionEngine implements ICompressionStrategy {
    * - 支持三种摘要模式:关闭、快速、迭代
    *
    * @param messages 裁剪后的消息列表
-   * @param prunedTokens 裁剪后的 Token 总数
+   * @param currentTokens 当前 Token 总数
    * @param targetTokens 目标 Token 数(上下文窗口 × 目标比例)
    * @param previousSummary 之前生成的摘要内容(可选)
    * @param compressionModel 用于生成摘要的专用模型配置
@@ -383,9 +374,10 @@ export class CompressionEngine implements ICompressionStrategy {
    */
   async compactMessages(
     messages: MessageRecord[],
-    prunedTokens: number,
+    currentTokens: number,
     targetTokens: number,
     previousSummary?: string,
+    summaryTokens?: number,
     compressionModel?: any,
     summaryMode: SummaryMode = SummaryMode.DEFAULT,
     chatModelName?: string,
@@ -409,6 +401,11 @@ export class CompressionEngine implements ICompressionStrategy {
           currentGroup = [];
         }
         messageGroups.push([msg]); // user 消息独立成组
+      } else if (msg.role === "assistant") {
+        if (currentGroup.length > 0) {
+          messageGroups.push(currentGroup);
+        }
+        currentGroup = [msg];
       } else {
         // assistant 或 tool 消息加入当前组
         currentGroup.push(msg);
@@ -417,10 +414,9 @@ export class CompressionEngine implements ICompressionStrategy {
     if (currentGroup.length > 0) {
       messageGroups.push(currentGroup);
     }
-
+    // 消息数量过少时无需压缩,直接返回原有摘要和全部消息
+    // 返回 undefined 表示没有实际压缩发生，调用方应回退到仅裁剪模式
     if (messages.length <= MIN_RETAINED_MESSAGES) {
-      // 消息数量过少时无需压缩,直接返回原有摘要和全部消息
-      // 返回 undefined 表示没有实际压缩发生，调用方应回退到仅裁剪模式
       this.logger.log(
         "messages is too short, no compression needed, returning original summary and all messages",
       );
@@ -428,7 +424,7 @@ export class CompressionEngine implements ICompressionStrategy {
         summary: previousSummary || "",
         retained: messages,
         lastCompactedContentId: undefined,
-        retainedTokens: prunedTokens,
+        retainedTokens: currentTokens,
       };
     }
 
@@ -447,6 +443,10 @@ export class CompressionEngine implements ICompressionStrategy {
         messageGroups[i],
       );
     }
+
+    this.logger.debug(
+      `retainedTokens: ${retainedTokens}, targetTokens: ${targetTokens}`,
+    );
 
     let retainGroupIndex = minRetainGroupIndex; // 默认从强制保留区的起点开始
     // 从强制保留区的前一组开始向前判断
@@ -505,34 +505,8 @@ export class CompressionEngine implements ICompressionStrategy {
 
     // 构造发送给 LLM 的提示词,包含历史摘要(若有)和待压缩的新增对话内容
     // 通过清晰的分区标记帮助模型理解不同部分的作用
-    const promptParts = [];
-    promptParts.push(`你是一个对话事件摘要生成专家。你的任务是将会话内容浓缩为一份**事件概要**，不记录具体事实细节。
+    const new_dialogue = [];
 
-## 定位说明
-- **摘要的定位是"事件索引"**：记录讨论过什么话题、正在进行什么任务、对话的氛围和走向。
-- **具体事实、偏好、决策、待办等已由独立的记忆系统保存**，摘要中不要重复记录这些内容。
-- 摘要的作用是在模型加载历史时快速了解"之前发生了什么"，而不是替代记忆系统。
-
-## 压缩原则
-1. **话题级概括**：记录讨论了哪些话题（如"讨论了 Python 并发方案"）和结论（如"决定用 multiprocessing.Pool"）。
-2. **事件走向**：记录对话的进展状态（如"正在实现登录模块"、"等待用户提供数据库地址"）。
-3. **省略细节**：跳过代码内容、具体参数、配置项、错误信息等细节、讨论过程。
-4. **时间有序**：按对话发生的时间线组织。
-5. **控制长度**：合并历史摘要时进一步浓缩，总长度不超过800字。
-
-## 输出结构
-- 使用简洁的自然段落，类似"讨论了X→决定Y→进行中Z"的风格。
-- 若无历史摘要，则仅基于新增对话生成。
-- 直接输出摘要正文，不附加任何解释、前言或后缀。
-
-## 输出示例(仅供参考风格)
-用户开始询问 Python 并发编程，讨论了 GIL 限制和多进程方案，目前正在 review 代码示例。后续话题转向了数据库选型，对比了 MySQL 和 PostgreSQL，暂未做最终决定。`);
-
-    if (previousSummary) {
-      promptParts.push(`\n\n【历史对话摘要】\n${previousSummary}\n`);
-    }
-
-    promptParts.push("【待压缩的新增对话内容】");
     toCompress.forEach((msg) => {
       // 构建简化的消息对象
       const simplifiedMsg: any = {
@@ -576,20 +550,72 @@ export class CompressionEngine implements ICompressionStrategy {
         return;
       }
 
-      promptParts.push(JSON.stringify(simplifiedMsg));
+      new_dialogue.push(JSON.stringify(simplifiedMsg));
     });
-
+    if (summaryTokens > 2000) {
+      this.logger.warn(`当前摘要已经过长，${summaryTokens} 个 Token`);
+    }
     // this.logger.debug(promptParts.join("\n"));
+    const promptStr =
+      previousSummary && previousSummary.length > 0
+        ? `You are a conversation summarization expert. Update the existing summary by integrating the new dialogue segments.
 
-    promptParts.push("\n\n开始压缩，不超过2000字");
+Rules:
+- Retain all valid information from the existing summary.
+- Add new topics and update task statuses based on the new dialogue.
+- If an item is completed, move it from "In Progress / To Do" to "Completed".
+- Merge redundant information, but do not omit any facts.
+- Output language must match the language of the dialogue.
+- Output the updated summary directly. Do not include any introductions, explanations, or meta-commentary (e.g., "Here is the updated summary"). Start directly with the summary content.
+
+The updated summary must maintain the same four-section structure (write "None" if empty):
+1. Completed: Record all tasks, decisions, and issues that have been explicitly resolved or finalized, as well as topics that have been discussed.
+2. In Progress: The user's latest questions/tasks and current progress.
+3. To Do: List any unfinished tasks, unanswered questions, or next steps — only include tasks or issues that have not yet been started.
+4. Other Context: Include key data, blockers, remarks worth keeping, etc.
+5. Target tokens: 2000 — do not exceed this limit. If remaining tokens are insufficient, merge and condense existing content.
+
+${summaryTokens > 2000 ? `** The current summary is too long. You must significantly condense the existing summary before integrating the new dialogue.**` : ``}
+
+Existing Summary (tokens: ${summaryTokens}):
+"""
+${previousSummary}
+"""
+
+New Dialogue:
+"""
+${new_dialogue.join("\n")}
+"""
+
+`
+        : `You are a conversation summarization expert. Generate a structured summary from the complete conversation history provided below.
+
+The summary must be organized into the following four sections (write "None" if a section is empty):
+1. Completed: Record all tasks, decisions, and issues that have been explicitly resolved or finalized, as well as topics that have been discussed.
+2. In Progress: The user's latest questions/tasks and current progress.
+3. To Do: List any unfinished tasks, unanswered questions, or next steps.
+4. Other Context: Include key data, blockers, remarks worth keeping, etc.
+
+Requirements:
+- Be concise and use bullet points.
+- Summarize strictly based on the provided conversation — do not infer.
+- Output language must match the language of the dialogue.
+- Output the summary directly. Do not include any introductions, explanations, or meta-commentary. Start directly with the summary content.
+
+Conversation History:
+"""
+${new_dialogue.join("\n")}
+"""
+
+Summary:`;
 
     // 快速摘要：单次 LLM 调用
     this.logger.log("Using fast summary mode (single call)");
     const response = await this.llmService.completions({
       model: compressionModel?.modelName || "gpt-3.5-turbo",
-      messages: [{ role: "user", content: promptParts.join("\n") }],
+      messages: [{ role: "user", content: promptStr }],
       temperature: 0.4,
-      maxTokens: 2000,
+      maxTokens: 4000,
       thinkingEffort: resolveThinkingEffort(compressionModel, "off"),
       stream: false,
       providerConfig: compressionModel.provider,

@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // IPC 通信方法
   getAppInfo: () => ipcRenderer.invoke('get-app-info'),
   getBackendPort: () => ipcRenderer.invoke('get-backend-port'),
+  getBackendStatusSync: () => ipcRenderer.sendSync('get-backend-status-sync'),
   showNotification: (title: string, body: string) => 
     ipcRenderer.invoke('show-notification', { title, body }),
   
@@ -52,6 +53,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openUserDataFolder: () => ipcRenderer.send('open-user-data-folder'),
   openInstallFolder: () => ipcRenderer.send('open-install-folder'),
   openFolder: (folderPath: string) => ipcRenderer.invoke('open-folder', folderPath),
+
+  // 数据迁移
+  migrateData: () => ipcRenderer.invoke('migrate-data'),
+
+  // 在资源管理器中显示并选中文件
+  showItemInFolder: (filePath: string) => ipcRenderer.invoke('show-item-in-folder', filePath),
+
+  // 用外部编辑器打开文件/目录（如 vscode，后续可扩展）
+  openWithEditor: (targetPath: string, editor: string) =>
+    ipcRenderer.invoke('open-with-editor', { path: targetPath, editor }),
   
   // 选择文件夹（返回选中的路径）
   selectFolder: () => ipcRenderer.invoke('select-folder'),
@@ -64,6 +75,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 打开外部链接（使用系统默认浏览器）
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+
+  // 后端就绪等待：单次 IPC invoke，后端就绪后 resolve
+  waitBackendReady: () => ipcRenderer.invoke('wait-backend-ready'),
 
   // 窗口管理（新 API - 浏览器自动化窗口）
   createBrowserWindow: (url?: string, metadata?: Record<string, any>) => 
@@ -92,5 +106,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('browser:toggle-window-visibility', { windowId }),
   getBrowserWindowVisibility: (windowId: string) =>
     ipcRenderer.invoke('browser:get-window-visibility', { windowId }),
+
+  // 托盘悬浮窗：推送聚合统计数据（fire-and-forget）
+  updateTrayStats: (stats: { running: number; unread: number }) =>
+    ipcRenderer.send('tray:update-stats', stats),
+
+  // 托盘悬浮窗：推送配置（显隐 + 透明度）
+  updateTraySettings: (settings: { enabled: boolean; opacity: number }) =>
+    ipcRenderer.send('tray:update-settings', settings),
 
 })

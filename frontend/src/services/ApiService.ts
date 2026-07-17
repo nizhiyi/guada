@@ -351,43 +351,41 @@ class ApiService {
     });
   }
 
-  // ========== 团队相关 ==========
-  async fetchTeams(): Promise<any[]> {
-    return await this._request("/teams");
+  // ========== 轻量 Agent 相关 ==========
+  async fetchAgents(): Promise<{ agents: any[]; groups: any[]; agentsDir?: string }> {
+    return await this._request("/agents");
   }
 
-  async fetchTeam(teamId: string): Promise<any> {
-    return await this._request(`/teams/${teamId}`);
+  async fetchAgentDetail(id: string): Promise<any> {
+    return await this._request(`/agents/${encodeURIComponent(id)}`);
   }
 
-  async createTeam(data: {
-    name: string;
-    description?: string;
-    leaderCharacterId: string;
-    memberCharacterIds?: string[];
-  }): Promise<any> {
-    return await this._request("/teams", { method: "POST", data });
+  async updateAgentVisibility(id: string, visible: boolean, collapsed?: boolean): Promise<any> {
+    return await this._request(`/agents/${encodeURIComponent(id)}/visibility`, {
+      method: "PUT",
+      data: collapsed !== undefined ? { visible, collapsed } : { visible },
+    });
   }
 
-  async updateTeam(
-    teamId: string,
-    data: {
-      name?: string;
-      description?: string;
-      leaderCharacterId?: string;
-      memberCharacterIds?: string[];
-    },
-  ): Promise<any> {
-    return await this._request(`/teams/${teamId}`, {
+  async deleteAgent(id: string): Promise<any> {
+    return await this._request(`/agents/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+
+  async createAgent(data: any): Promise<any> {
+    return await this._request("/agents", { method: "POST", data });
+  }
+
+  async updateAgent(id: string, data: any): Promise<any> {
+    return await this._request(`/agents/${encodeURIComponent(id)}`, {
       method: "PUT",
       data,
     });
   }
 
-  async deleteTeam(teamId: string): Promise<{ success: boolean }> {
-    return await this._request(`/teams/${teamId}`, {
-      method: "DELETE",
-    });
+  async importAgents(data: { files: { content: string; filename: string }[]; folder?: string; overwrite?: boolean }): Promise<any> {
+    return await this._request("/agents/import", { method: "POST", data });
   }
 
   // ========== 会话相关 ==========
@@ -640,6 +638,16 @@ class ApiService {
     const baseUrl = this.baseURL.replace(/\/$/, '');
     const token = sessionStorage.getItem("token") || localStorage.getItem("token") || '';
     return `${baseUrl}/sessions/${sessionId}/workspace/raw-file?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
+  }
+
+  /**
+   * 获取 HTML 预览的 URL（用于 iframe src）
+   * 携带 token query 参数，后端验证后通过 Set-Cookie 让子资源请求自动鉴权
+   */
+  getWorkspaceHtmlPreviewUrl(sessionId: string, filePath: string): string {
+    const baseUrl = this.baseURL.replace(/\/$/, '');
+    const token = sessionStorage.getItem("token") || localStorage.getItem("token") || '';
+    return `${baseUrl}/sessions/${sessionId}/workspace/html-preview/${encodeURIComponent(filePath)}?token=${encodeURIComponent(token)}`;
   }
 
   /**
@@ -1006,22 +1014,30 @@ class ApiService {
     });
   }
 
-  async fetchGlobalTools(): Promise<any> {
-    return await this._request("/settings/plugins/global");
+  async queryPlugins(config?: any): Promise<any> {
+    return await this._request("/plugins/query", {
+      method: "POST",
+      data: { config },
+    });
   }
 
   async updateGlobalToolStatus(
     pluginId: string,
     enabled: boolean,
   ): Promise<{ success: boolean }> {
-    return await this._request("/settings/plugins/global", {
+    return await this._request("/plugins/global", {
       method: "PUT",
       data: { pluginId, enabled },
     });
   }
 
-  async fetchCharacterTools(characterId: string): Promise<any> {
-    return await this._request(`/characters/${characterId}/tools`);
+  /**
+   * 重新加载插件（切换供应商后触发重新注册工具）
+   */
+  async reloadPlugin(pluginId: string): Promise<{ success: boolean }> {
+    return await this._request(`/plugins/reload/${pluginId}`, {
+      method: "POST",
+    });
   }
 
   // ========== MCP 服务器管理 ==========
@@ -1080,6 +1096,14 @@ class ApiService {
    */
   async fetchSkills(): Promise<PaginatedResponse<any>> {
     return await this._request("/skills");
+  }
+
+  /**
+   * 获取命令列表（按触发方式聚合所有提供者的 items）
+   * @param trigger 'slash' | 'mention'
+   */
+  async fetchCommands(trigger: string): Promise<{ items: any[]; total: number }> {
+    return await this._request(`/commands?trigger=${trigger}`);
   }
 
   /**

@@ -4,15 +4,16 @@ import * as fs from "fs";
 import { LLMService } from "../llm-core/llm.service";
 import { ToolOrchestrator } from "../tools/tool-orchestrator.service";
 import { PluginManager } from "../plugins/plugin.manager";
+import { PromptCollector } from "../plugins/prompt-collector.service";
+import { PluginContext } from "../plugins/types/plugin.types";
 import { MessageRecord, LLMResponseChunk } from "../llm-core/types/llm.types";
 import { RequestContext } from "../../common/context/request-context";
 import { throttledStream } from "./utils/stream-throttle.util";
 import { ToolCallDisplayUtil } from "./utils/tool-call-display.util";
 import { ISessionContext, ModelConfig } from "./session-context";
-import { ToolRuntime } from "../tools/tool-context";
 import { EventChunk } from "./types/event-chunk.types";
-import { partialParse } from "partial-json-parser";
 import { SummaryMode } from "./compression-engine";
+import { RateLimitError } from "../llm-core/utils/retry.util";
 
 /**
  * 审批上下文
@@ -71,6 +72,7 @@ export class AgentEngine {
   constructor(
     private toolOrchestrator: ToolOrchestrator,
     private pluginManager: PluginManager,
+    private promptCollector: PromptCollector,
     private llmService: LLMService,
     private displayManager: ToolCallDisplayUtil,
   ) {}
@@ -160,8 +162,11 @@ export class AgentEngine {
     abortSignal?: AbortSignal,
     resumeData?: any,
   ): AsyncGenerator<EventChunk> {
-    const toolContext = sessionContext.getToolContext();
-    const tools = toolContext?.getFlatTools();
+    const resolved = sessionContext.getResolvedPlugins();
+    const tools =
+      resolved.length > 0
+        ? ToolOrchestrator.toFlatToolDefs(resolved)
+        : undefined;
 
     // 判断是否为断点模式
 
@@ -171,9 +176,6 @@ export class AgentEngine {
     let responseMessageId: string;
 
     if (!isResumeMode) {
-      // 【正常模式】生成新的 turnsId 和 messageId
-
-      // 生成本次对话轮次的唯一 ID，用于关联同一轮中的所有消息和工具调用
       turnsId = sessionContext.generateId();
 
       // 准备助手回复的消息容器，根据再生模式决定是覆盖旧回复还是创建新版本
@@ -183,24 +185,24 @@ export class AgentEngine {
         turnsId,
         assistantMessageId,
       );
+      sessionContext.setMessageCursor(userMessageId);
     }
     let needToContinue = false;
 
     // 工具调用轮次计数器
     let iterationCount = 0;
-    sessionContext.setMessageCursor(userMessageId);
     do {
       iterationCount++;
       needToContinue = false;
 
       // 从会话上下文中获取准备发送给 LLM 的完整消息列表（含 system prompt、摘要和历史）
-      const historyMessages = await sessionContext.getMessages();
+      let historyMessages = await sessionContext.getMessages();
 
       // 消息已加载，此时检查是否需要进入保存/压缩状态
       if (await sessionContext.shouldCompress()) {
-        // onStage2 回调：仅在需要二级压缩（摘要/丢弃）时触发
-        const onStage2 = async () => {
-          console.log("onStage2", sessionContext.getMemoryConfig());
+        // onBeforeCompaction 回调：仅在需要二级压缩（摘要/丢弃）时触发
+        const onBeforeCompaction = async () => {
+          console.log("onBeforeCompaction", sessionContext.getMemoryConfig());
           if (
             sessionContext.getMemoryConfig().summaryMode ===
             SummaryMode.MEMORY_SYNC
@@ -210,10 +212,10 @@ export class AgentEngine {
             console.log("memory save shadow turn done");
           }
         };
-        await sessionContext.compress(onStage2);
+        historyMessages = await sessionContext.compress(onBeforeCompaction);
         // 必须继续循环，确保压缩完成后再继续
-        needToContinue = true;
-        continue;
+        // needToContinue = true;
+        // continue;
       }
 
       // 生成本轮助手回复的内容 ID，用于唯一标识该轮次的输出
@@ -236,8 +238,13 @@ export class AgentEngine {
         turnsId = lastMessage.turnsId;
         if (lastMessage.role === "tool") {
           isResumeMode = false;
+          needToContinue = true;
+          continue;
+        } else if (lastMessage.role === "user") {
+          this.logger.warn("invalid resume mode, last message is user");
           continue;
         }
+        this.logger.debug("Enter resume mode");
       }
 
       // 断点模式：发送 update 事件
@@ -266,7 +273,9 @@ export class AgentEngine {
           const streamResult = this.executeLLMStream(
             historyMessages,
             sessionContext.getModelConfig(),
-            sessionContext.getToolContext()?.getFlatTools(),
+            ToolOrchestrator.toFlatToolDefs(
+              sessionContext.getResolvedPlugins(),
+            ),
             sessionContext.getThinkingEffort(),
             abortSignal,
           );
@@ -290,7 +299,7 @@ export class AgentEngine {
             const yieldEvent = this.toEventChunk(
               chunk,
               accumulated,
-              toolContext,
+              undefined,
               contentId,
             );
             if (yieldEvent) {
@@ -351,7 +360,7 @@ export class AgentEngine {
           if (!abortSignal || !abortSignal.aborted) {
             yield {
               type: "finish",
-              finishReason: "error",
+              finishReason: assistantResponse.metadata?.finishReason || "error",
               error: streamError.message,
               usage: lastAcc?.usage,
               contentId,
@@ -394,88 +403,40 @@ export class AgentEngine {
           break;
         }
 
-        // 【关键】将工具分为三组
-        const { pendingTools, approvedTools, rejectedTools } =
-          this.classifyToolsByApproval(
-            assistantResponse.toolCalls,
-            assistantResponse.metadata,
-            sessionContext,
-          );
+        // 【关键】将工具分为三组并执行
+        const execResult = await this.executeToolsAndBuildParts(
+          assistantResponse,
+          sessionContext,
+          abortSignal,
+        );
 
-        // 【原子性审批】只要有需要审批且未审批的工具，就触发审批请求
-        if (pendingTools.length > 0) {
-          // 保存审批上下文到 metadata
-          if (!assistantResponse.metadata) {
-            assistantResponse.metadata = {};
-          }
-
-          assistantResponse.metadata.approvalContext = {
-            type: "approval",
-            status: "pending",
-            pendingToolCallIds: pendingTools.map((tc: any) => tc.id),
-            createdAt: new Date().toISOString(),
-          } as ApprovalContext;
-
-          // 提前终止，发送审批请求
+        // 【原子性审批】需要审批时提前终止
+        if (execResult.approvalContext) {
+          assistantResponse.metadata.approvalContext =
+            execResult.approvalContext;
           yield {
             type: "finish",
             finishReason: "approval_required",
             usage: assistantResponse.metadata?.usage,
           };
-
           await sessionContext.appendParts(parts);
-
           break;
         }
 
-        // 【已处理场景】执行 approved 工具 + 为 rejected 工具生成错误响应
-        // 工具执行完毕后，重新格式化展示文案（此时已完成状态），更新到 assistant metadata，
-        // 再通过 tool_calls_response 事件传送给前端（工具结果本身不持久化文案）
-
-        // 执行 approved 工具（包括已通过审批和不需要审批的）
-        let toolResponses: any[] = [];
-        if (approvedTools.length > 0) {
-          const toolContext = sessionContext.getToolContext();
-          toolResponses = await this.toolOrchestrator.executeBatch(
-            approvedTools.map((tc: any) => ({
-              id: tc.id,
-              name: tc.name,
-              arguments: partialParse(tc.arguments) || {},
-            })),
-            toolContext,
-            abortSignal,
-          );
-
-          // 工具执行完毕，重新格式化文案（已完成状态）并更新到 assistant toolCalls metadata
-          const toolCallDisplayMessages = approvedTools.map((at: any) => {
-            const tc = assistantResponse.toolCalls?.find(
-              (t: any) => t.id === at.id,
-            );
-            if (tc) {
-              if (!tc.metadata) tc.metadata = {};
-              tc.metadata.displayMessage = this.displayManager.format(
-                tc.name,
-                tc.arguments,
-                false,
-                toolContext,
-              );
-              return tc.metadata.displayMessage;
-            }
-            return undefined;
-          });
-
+        // 【执行】yield 工具结果 + 入库
+        if (execResult.toolResponses.length > 0) {
           yield {
             type: "tool_calls_response",
-            toolCallsResponse: toolResponses.map((tr) => ({
+            toolCallsResponse: execResult.toolResponses.map((tr: any) => ({
               name: tr.name,
               content: tr.content,
               toolCallId: tr.toolCallId,
             })),
-            displayMessages: toolCallDisplayMessages,
+            displayMessages: execResult.displayMessages,
             contentId,
           };
 
-          for (const res of toolResponses) {
+          for (const res of execResult.toolResponses) {
             parts.push({
               role: "tool",
               name: res.name,
@@ -485,58 +446,25 @@ export class AgentEngine {
               turnsId: turnsId,
             });
           }
+          needToContinue = true;
         }
-
-        // 为 rejected 工具生成错误响应
-        if (rejectedTools.length > 0) {
-          for (const rejected of rejectedTools) {
-            // 从 decisions 中获取拒绝原因
-            const decision =
-              assistantResponse.metadata?.approvalContext?.decisions?.find(
-                (d: any) => d.toolCallId === rejected.id,
-              );
-
-            // 构建错误消息：固定前缀 + 可选的原因
-            let errorMessage = "用户拒绝了工具执行";
-            if (decision?.reason) {
-              errorMessage += `，原因：${decision.reason}`;
-            }
-
-            const errorResponse = {
-              toolCallId: rejected.id,
-              name: rejected.name,
-              content: JSON.stringify({
-                success: false,
-                message: errorMessage,
-              }),
-              isError: true,
-            };
-
-            yield {
-              type: "tool_calls_response",
-              toolCallsResponse: [errorResponse],
-            };
-
-            parts.push({
-              role: "tool",
-              name: errorResponse.name,
-              content: errorResponse.content,
-              toolCallId: errorResponse.toolCallId,
-              messageId: responseMessageId,
-              turnsId: turnsId,
-            });
-          }
-        }
-
-        // 在持久化前，将最终的文案注入到 toolCalls 的 metadata 中
-        needToContinue = true;
       }
 
       // 将本轮产生的所有消息（助手回复 + 工具响应）追加到会话上下文并持久化存储
-      await sessionContext.appendParts(parts);
+      if (parts.length > 0) {
+        await sessionContext.appendParts(parts);
+      }
 
       this.logger.debug(
-        `Iteration ${iterationCount} cleanup completed. Finish reason: ${assistantResponse.metadata?.finishReason}`,
+        `Iteration ${iterationCount} completed. reason: ${assistantResponse.metadata?.finishReason} continue=${needToContinue}`,
+      );
+
+      // 开发模式下每次迭代完成后保存对话历史到 .guada/logs 便于审计
+      this.saveTranscript(
+        historyMessages,
+        parts,
+        sessionContext.getWorkspacePath(),
+        sessionContext.sessionId,
       );
     } while (needToContinue);
     await sessionContext.persist();
@@ -647,7 +575,6 @@ export class AgentEngine {
             tc.name,
             tc.arguments,
             true,
-            runtime,
           );
         });
       }
@@ -662,7 +589,6 @@ export class AgentEngine {
           tc.name,
           tc.arguments,
           true,
-          runtime,
         );
       });
     } else if (chunk.type === "text" || chunk.content) {
@@ -724,6 +650,12 @@ export class AgentEngine {
     ) {
       // 超时错误，标记为 timeout 并记录详细错误信息
       currentChunk.metadata.finishReason = "timeout";
+      currentChunk.metadata.error = streamError.message;
+    } else if (
+      streamError instanceof RateLimitError
+    ) {
+      // 429 限流错误（重试已耗尽），标记为 rate_limited 以便前端展示继续按钮
+      currentChunk.metadata.finishReason = "rate_limited";
       currentChunk.metadata.error = streamError.message;
     } else {
       // 其他 API 错误或运行时错误，标记为 error 并记录完整错误消息
@@ -825,6 +757,47 @@ export class AgentEngine {
           `Has finish: ${currentTurnThinkingInfo.thinkingFinishedAt !== null}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * 开发模式下保存当前对话历史到 .guada/logs（每次覆盖，便于审计）
+   */
+  private saveTranscript(
+    historyMessages: MessageRecord[],
+    newParts: MessageRecord[],
+    workspacePath: string,
+    sessionId: string,
+  ): void {
+    // 仅开发模式下保存
+    if (process.env.NODE_ENV === "production" || !workspacePath || !sessionId) {
+      return;
+    }
+    try {
+      const transcriptDir = path.join(workspacePath, ".guada", "logs");
+      fs.mkdirSync(transcriptDir, { recursive: true });
+      const filePath = path.join(transcriptDir, `${sessionId}_transcript.json`);
+      const allMessages = [...historyMessages, ...newParts];
+      const data = allMessages.map((m) => ({
+        role: m.role,
+        metadata: m.metadata,
+        content:
+          typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+        toolCalls: m.toolCalls
+          ? m.toolCalls.map((tc) => ({
+              name: tc.name,
+              arguments: tc.arguments,
+            }))
+          : undefined,
+        toolCallId: m.toolCallId,
+        name: m.name,
+        reasoningContent: m.reasoningContent,
+      }));
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    } catch (e) {
+      this.logger.warn(
+        `保存对话历史失败: ${e instanceof Error ? e.message : e}`,
+      );
     }
   }
 
@@ -947,180 +920,103 @@ export class AgentEngine {
     sessionContext: ISessionContext,
     abortSignal?: AbortSignal,
   ): Promise<void> {
-    // 跳过工具提示词注入（影子轮次只需要记忆和文件工具，不需要 skill 描述等）
-    const messages = await sessionContext.getMessages({ exclude: ["tool"] });
-    const shadowMessages: MessageRecord[] = [];
+    // 切换到 memory 模式：getResolvedPlugins() 只返回 memory 插件，
+    // getSettings('skills') 返回空，确保 LLM 和工具执行层一致受限
+    const originalMode = sessionContext.getRunMode();
+    await sessionContext.setRunMode("memory");
+    try {
+      // 跳过工具提示词注入（影子轮次只需要记忆和文件工具，不需要 skill 描述等）
+      const messages = await sessionContext.getMessages();
+      const shadowMessages: MessageRecord[] = [];
 
-    const modelConfig = sessionContext.getModelConfig();
+      const modelConfig = sessionContext.getModelConfig();
 
-    // 通过 PluginManager 获取记忆提示词（guide=静态说明, content=动态记忆内容）
-    const memoryGuide =
-      (
-        await this.pluginManager.collectPluginLazyPrompts(
-          "memory",
-          sessionContext,
-        )
-      )
-        .map((p) => p.content)
-        .join("\n") || "";
+      // 组装指令消息（history 中不含系统提示词，此处自行注入）
+      const instructionParts: string[] = [
+        `<system>
+[BEGIN SILENT SYSTEM PROCESS - MEMORY MAINTENANCE]
+⚠️ CRITICAL MODE SWITCH: You are currently executing a background system routine. 
+You are NOT in a conversation with the user. Do not attempt to answer the user's previous prompt in this specific turn.
+Your output will be parsed by the system, not read by the user.
 
-    const memoryContent =
-      (await this.pluginManager.collectPluginPrompts("memory", sessionContext))
-        .map((p) => p.content)
-        .join("\n") || "";
+【OBJECTIVE】
+The context is too long and will be compressed. The conversation history may be trimmed or discarded.
+Scan the conversation history to see if there is any content that needs long-term memory. If there is, use the memory tool to save it.
 
-    // console.log("memoryGuide", memoryGuide);
-    if (!memoryGuide) return;
+【EVALUATION LOGIC】
+Scan history. ONLY trigger an update if:
+- New explicit long-term preferences/habits found.
+- Critical factual corrections provided.
+- Existing memory conflicts or is outdated.
+(Note: If <factual-memory/> is already accurate, do nothing.)
 
-    // 构建专属运行时：仅含受限的文件工具，不依赖原会话的 toolContext
-    const allGroups = await this.pluginManager.getTools(sessionContext);
-    const allFileTools =
-      allGroups.find((g) => g.pluginId === "file")?.tools || [];
-    const fileTools = allFileTools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters as any,
-    }));
-    // console.log("fileTools", fileTools);
-    if (fileTools.length === 0) return;
+【EXECUTION PROTOCOL】
+1. IF NO update needed:
+   - Output EXACTLY: DONE
+   - STOP immediately.
 
-    const shadowRuntime = new ToolRuntime(
-      sessionContext,
-      new Map(fileTools.map((t) => [t.name, t])),
-      new Map(),
-    );
+2. IF update IS needed:
+   - Use memory tool ('memory') to update memory.
+   - Max 5 tool calls.
+   - After tools finish, Output EXACTLY: DONE
+   - STOP immediately.
 
-    // 组装指令消息（history 中不含系统提示词，此处自行注入）
-    const instructionParts: string[] = [
-      `<system_message>`,
-      `这是一条系统消息，即将进行上下文压缩，请检查你的记忆文件是否需要更新。`,
-      `如果有新的重要信息（用户偏好、决策、待办等），请使用文件工具写入记忆。`,
-      ``,
-      memoryGuide,
-    ];
+【STRICT OUTPUT FORMAT】
+- The ONLY valid output string is "DONE".
+- Any other text (including explanations, apologies, or reasoning) will cause a system error.
+- Do not worry about the user's pending questions; the system will return to normal mode after receiving "DONE".
+[END SILENT SYSTEM PROCESS]
+</system>`,
+      ];
 
-    // 注入当前已保存的记忆内容（避免 AI 额外花一轮工具调用读取）
-    if (memoryContent) {
-      instructionParts.push(
-        ``,
-        `---`,
-        `以下是当前已保存的记忆内容：`,
-        memoryContent,
-      );
-    }
+      shadowMessages.push({
+        role: "user",
+        content: instructionParts.join("\n"),
+      });
 
-    instructionParts.push(
-      ``,
-      `操作原则：`,
-      `- 已保存的内容无需重复写入`,
-      `- 发现冲突、冗余、过时的记忆需要进行对应的更正和简化`,
-      `- 只保存重要的、持久的、未来需要的信息`,
-      `- 写入完成后不需要回复用户`,
-      `- 最多操作 5 轮工具调用，工作流程如下：`,
-      `  1. LLM 调用文件工具批量读取记忆文件，判断是否需要保存记忆`,
-      `  2. 若需要保存，调用文件工具批量写入记忆`,
-      `  3. 若无需要保存或者保存完毕，回复"DONE"并且不要再调用任何工具`,
-      `</system_message>`,
-    );
+      // 与主循环共用 executeLLMStream，保证参数一致
+      const MAX_ROUNDS = 5;
 
-    shadowMessages.push({
-      role: "user",
-      content: instructionParts.join("\n"),
-    });
+      for (let round = 1; round <= MAX_ROUNDS; round++) {
+        try {
+          const streamResult = this.executeLLMStream(
+            messages.concat(shadowMessages),
+            modelConfig,
+            ToolOrchestrator.toFlatToolDefs(
+              sessionContext.getResolvedPlugins(),
+            ),
+            sessionContext.getThinkingEffort(),
+            abortSignal,
+          );
 
-    // 与主循环共用 executeLLMStream，保证参数一致
-    const MAX_ROUNDS = 5;
-    for (let round = 1; round <= MAX_ROUNDS; round++) {
-      try {
-        const streamResult = this.executeLLMStream(
-          messages.concat(shadowMessages),
-          modelConfig,
-          fileTools,
-          sessionContext.getThinkingEffort(),
-          abortSignal,
-        );
-
-        let accumulated: LLMResponseChunk = {};
-        for await (const { accumulated: acc } of streamResult) {
-          accumulated = acc;
-        }
-
-        shadowMessages.push({
-          role: "assistant",
-          reasoningContent: accumulated.reasoningContent || null,
-          content: accumulated.content || null,
-          toolCalls: accumulated.toolCalls,
-        });
-        if (!accumulated.toolCalls?.length) break;
-
-        // 收集本轮所有工具调用，批量执行
-        const batch: { id: string; name: string; arguments: any }[] = [];
-        const errors: { id: string; name: string; content: string }[] = [];
-
-        for (const tc of accumulated.toolCalls) {
-          let args: any;
-          try {
-            args =
-              typeof tc.arguments === "string"
-                ? JSON.parse(tc.arguments)
-                : tc.arguments;
-          } catch {
-            continue;
+          let accumulated: LLMResponseChunk = {};
+          for await (const { accumulated: acc } of streamResult) {
+            accumulated = acc;
           }
 
-          // 路径校验：影子轮次只允许操作记忆相关目录
-          const targetPath = args.path || args.file_path || "";
-          const workspacePath = sessionContext.workspacePath;
-          const allowedPrefixes =
-            sessionContext.sessionType === "sub_agent"
-              ? [
-                  `.guada/subagents/${sessionContext.sessionId}/memory/`,
-                  `.guada/subagents/${sessionContext.sessionId}/memos/`,
-                ]
-              : [`.guada/memory/`, `.guada/memos/`];
+          shadowMessages.push({
+            role: "assistant",
+            reasoningContent: accumulated.reasoningContent || null,
+            content: accumulated.content || null,
+            toolCalls: accumulated.toolCalls,
+          });
+          if (!accumulated.toolCalls?.length) break;
 
-          const normalizeForComparison = (p: string): string => {
-            let normalized = path.normalize(p).replace(/\\/g, "/");
-            if (!path.isAbsolute(normalized)) {
-              normalized = path.join(workspacePath, normalized);
-            }
-            return normalized;
-          };
-
-          const normalizedTarget = normalizeForComparison(targetPath);
-          const isAllowed =
-            normalizedTarget &&
-            allowedPrefixes.some((prefix) => {
-              const normalizedPrefix = normalizeForComparison(prefix);
-              return normalizedTarget.startsWith(normalizedPrefix);
-            });
-          if (!isAllowed) {
-            errors.push({
+          const responses = await this.toolOrchestrator.executeBatch(
+            accumulated.toolCalls.map((tc: any) => ({
               id: tc.id,
               name: tc.name,
-              content: `ERROR: 不允许操作 ${targetPath}，记忆操作仅限于 memory/ 和 memos/ 目录`,
-            });
-            continue;
-          }
-
-          batch.push({ id: tc.id, name: tc.name, arguments: args });
-        }
-
-        // 先推入拒绝的路径错误
-        for (const e of errors) {
-          shadowMessages.push({
-            role: "tool",
-            content: e.content,
-            toolCallId: e.id,
-            name: e.name,
-          });
-        }
-
-        // 批量执行合法的工具调用
-        if (batch.length > 0) {
-          const responses = await this.toolOrchestrator.executeBatch(
-            batch,
-            shadowRuntime,
+              arguments: (() => {
+                try {
+                  return typeof tc.arguments === "string"
+                    ? JSON.parse(tc.arguments)
+                    : tc.arguments;
+                } catch {
+                  return {};
+                }
+              })(),
+            })),
+            sessionContext,
           );
           for (const r of responses) {
             shadowMessages.push({
@@ -1130,31 +1026,131 @@ export class AgentEngine {
               name: r.name,
             });
           }
+        } catch (error: any) {
+          this.logger.error(`记忆保存第${round}轮失败: ${error.message}`);
+          break;
         }
-      } catch (error: any) {
-        this.logger.warn(`记忆保存第${round}轮失败: ${error.message}`);
-        break;
+      }
+      // 落盘原始交互记录
+      try {
+        const logDir = path.join(
+          sessionContext.getWorkspacePath(),
+          ".guada",
+          "logs",
+        );
+        fs.mkdirSync(logDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(logDir, "compression.jsonl"),
+          JSON.stringify({
+            time: new Date().toISOString(),
+            sessionId: sessionContext.sessionId,
+            records: [messages[0] || {}].concat(shadowMessages),
+          }) + "\n",
+        );
+      } catch (e) {
+        // 非关键
+      }
+      // 不入库，不 yield
+    } finally {
+      await sessionContext.setRunMode(originalMode);
+    }
+  }
+
+  /**
+   * 执行工具并构建入库数据（不 yield 事件，不入库）
+   *
+   * 由 executeAgentLoop 调用，返回执行结果后由调用方负责 yield 和 persist。
+   */
+  private async executeToolsAndBuildParts(
+    assistantResponse: MessageRecord,
+    sessionContext: ISessionContext,
+    abortSignal?: AbortSignal,
+  ): Promise<{
+    toolResponses: any[];
+    displayMessages: (string | undefined)[];
+    approvalContext?: any;
+  }> {
+    const toolCalls = assistantResponse.toolCalls;
+    if (!toolCalls) return { toolResponses: [], displayMessages: [] };
+    // 1. 分为三组
+    const { pendingTools, approvedTools, rejectedTools } =
+      this.classifyToolsByApproval(
+        toolCalls,
+        assistantResponse.metadata,
+        sessionContext,
+      );
+
+    // 2. 需要审批 → 返回 approvalContext
+    if (pendingTools.length > 0) {
+      return {
+        toolResponses: [],
+        displayMessages: [],
+        approvalContext: {
+          type: "approval",
+          status: "pending",
+          pendingToolCallIds: pendingTools.map((tc: any) => tc.id),
+          createdAt: new Date().toISOString(),
+        },
+      };
+    }
+
+    // 3. 执行 approved + 为 rejected 生成错误响应
+    const toolResponses: any[] = [];
+    const displayMessages: (string | undefined)[] = [];
+
+    if (approvedTools.length > 0) {
+      const results = await this.toolOrchestrator.executeBatch(
+        approvedTools.map((tc: any) => ({
+          id: tc.id,
+          name: tc.name,
+          arguments: (() => {
+            try {
+              return typeof tc.arguments === "string"
+                ? JSON.parse(tc.arguments)
+                : tc.arguments;
+            } catch {
+              return {};
+            }
+          })(),
+        })),
+        sessionContext,
+        abortSignal,
+      );
+      toolResponses.push(...results);
+
+      for (const at of approvedTools) {
+        const tc = assistantResponse.toolCalls?.find(
+          (t: any) => t.id === at.id,
+        );
+        if (tc) {
+          if (!tc.metadata) tc.metadata = {};
+          tc.metadata.displayMessage = this.displayManager.format(
+            tc.name,
+            tc.arguments,
+            false,
+          );
+          displayMessages.push(tc.metadata.displayMessage);
+        } else {
+          displayMessages.push(undefined);
+        }
       }
     }
-    // 落盘原始交互记录
-    try {
-      const logDir = path.join(
-        sessionContext.getWorkspacePath(),
-        ".guada",
-        "logs",
-      );
-      fs.mkdirSync(logDir, { recursive: true });
-      fs.appendFileSync(
-        path.join(logDir, "compression.jsonl"),
-        JSON.stringify({
-          time: new Date().toISOString(),
-          sessionId: sessionContext.sessionId,
-          records: shadowMessages,
-        }) + "\n",
-      );
-    } catch (e) {
-      // 非关键
+
+    for (const rejected of rejectedTools) {
+      const decision =
+        assistantResponse.metadata?.approvalContext?.decisions?.find(
+          (d: any) => d.toolCallId === rejected.id,
+        );
+      let errorMessage = "用户拒绝了工具执行";
+      if (decision?.reason) errorMessage += `，原因：${decision.reason}`;
+      toolResponses.push({
+        toolCallId: rejected.id,
+        name: rejected.name,
+        content: JSON.stringify({ success: false, message: errorMessage }),
+        isError: true,
+      });
     }
-    // 不入库，不 yield
+
+    return { toolResponses, displayMessages };
   }
 }

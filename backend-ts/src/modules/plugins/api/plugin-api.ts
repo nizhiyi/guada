@@ -4,9 +4,14 @@ import {
   PromptPiece,
   ToolLoadMode,
   ToolSetRuntime,
+  ToolKitDef,
+  ToolKitHandle,
+  ToolKitRegistration,
 } from "../types/plugin.types";
 import { PluginRegistry } from "../registry/plugin-registry";
+import { Toolkit } from "../toolkit/toolkit";
 import { z } from "zod";
+import { ICommandProvider } from "../../commands/interfaces/command-provider.interface";
 
 // ── PluginApi ──
 
@@ -68,32 +73,43 @@ export interface PluginApi {
   registerPrompt(def: {
     content: string | ((ctx: PluginContext) => string | Promise<string>);
     frequency?: "STATIC" | "REGULAR" | "VOLATILE";
+    type?: "system" | "user";
     toolSet?: string;
     description?: string;
   }): void;
 
   registerRawTool(def: ToolHandlerDef): void;
+
+  /**
+   * 注册工具包（ToolKit）
+   *
+   * 支持两种用法：
+   * 1. 回调方式：registerToolKit({ onLoad: (toolkit) => { toolkit.registerTool({...}) } })
+   * 2. 返回值方式：const tk = registerToolKit({}); tk.registerTool({...})
+   */
+  registerToolKit(def: ToolKitDef): ToolKitHandle;
+
+  /**
+   * 注册命令提供者（斜杠命令 / 艾特命令）
+   * 插件通过此接口注册后，前端即可通过 / 或 @ 触发该命令的补全列表。
+   */
+  registerCommandProvider(def: ICommandProvider): void;
 }
 
 // ── PluginApi 实现 ──
 
 export class PluginApiImpl implements PluginApi {
-  private _toolSets: Array<{
-    name: string;
-    loadMode: ToolLoadMode;
-    activator?: string;
-    handler?: (
-      ctx: PluginContext,
-    ) => ToolSetRuntime | Promise<ToolSetRuntime>;
-  }> = [];
   private _toolDefs: ToolHandlerDef[] = [];
+  private _toolKits: Toolkit[] = [];
   private _promptMetas: Array<{
     methodName: string;
     frequency: string;
+    type?: "system" | "user";
     toolSet?: string;
     description: string;
     handler: (context: any) => string | Promise<string>;
   }> = [];
+  private _commandProviders: ICommandProvider[] = [];
 
   constructor(
     private pluginId: string,
@@ -104,19 +120,11 @@ export class PluginApiImpl implements PluginApi {
     name: string;
     loadMode?: ToolLoadMode;
     activator?: string;
-    handler?: (
-      ctx: PluginContext,
-    ) => ToolSetRuntime | Promise<ToolSetRuntime>;
+    handler?: (ctx: PluginContext) => ToolSetRuntime | Promise<ToolSetRuntime>;
   }): void {
-    const entry = {
-      name: def.name,
-      loadMode: def.loadMode || "lazy",
-      activator: def.activator,
-      handler: def.handler,
-    };
-    if (!this._toolSets.find((x) => x.name === entry.name)) {
-      this._toolSets.push(entry);
-    }
+    throw new Error(
+      "registerToolSet 已废弃，请使用 registerToolKit 替代。插件: " + this.pluginId,
+    );
   }
 
   registerTool(def: any): void {
@@ -126,7 +134,10 @@ export class PluginApiImpl implements PluginApi {
       const rawJson = z.toJSONSchema(zodSchema) as any;
 
       // 提取 required、properties（兼容不同输出格式）
-      const root = rawJson.type === "object" ? rawJson : rawJson.$defs?.[Object.keys(rawJson.$defs || {})[0]] || rawJson;
+      const root =
+        rawJson.type === "object"
+          ? rawJson
+          : rawJson.$defs?.[Object.keys(rawJson.$defs || {})[0]] || rawJson;
       const required: string[] = root.required || [];
       const properties: Record<string, any> = {};
       const rawProps = root.properties || {};
@@ -141,7 +152,9 @@ export class PluginApiImpl implements PluginApi {
         properties[key] = clean;
       }
 
-      const argsKey = def.display?.argsKey ?? Object.keys(properties).find(k => properties[k]?.type === "string");
+      const argsKey =
+        def.display?.argsKey ??
+        Object.keys(properties).find((k) => properties[k]?.type === "string");
 
       const entry: ToolHandlerDef = {
         name: def.name,
@@ -215,12 +228,14 @@ export class PluginApiImpl implements PluginApi {
   registerPrompt(def: {
     content: string | ((ctx: PluginContext) => string | Promise<string>);
     frequency?: "STATIC" | "REGULAR" | "VOLATILE";
+    type?: "system" | "user";
     toolSet?: string;
     description?: string;
   }): void {
     const meta = {
       methodName: "",
       frequency: def.frequency || "REGULAR",
+      type: def.type,
       toolSet: def.toolSet,
       description: def.description || "",
       handler: (typeof def.content === "function"
@@ -233,6 +248,20 @@ export class PluginApiImpl implements PluginApi {
   registerRawTool(def: ToolHandlerDef): void {
     if (!this._toolDefs.find((x) => x.name === def.name)) {
       this._toolDefs.push(def);
+    }
+  }
+
+  registerToolKit(def: ToolKitDef): ToolKitHandle {
+    const toolkit = new Toolkit(def, this.pluginId);
+    if (!this._toolKits.find((x) => x.id === toolkit.id)) {
+      this._toolKits.push(toolkit);
+    }
+    return toolkit;
+  }
+
+  registerCommandProvider(def: ICommandProvider): void {
+    if (!this._commandProviders.find((x) => x.id === def.id)) {
+      this._commandProviders.push(def);
     }
   }
 
@@ -249,21 +278,7 @@ export class PluginApiImpl implements PluginApi {
       });
     }
 
-    // 注册 toolSets
-    for (const ts of this._toolSets) {
-      PluginRegistry.registerToolSet(this.pluginId, {
-        id: ts.name,
-        name: ts.name,
-        tools: this._toolDefs
-          .filter((t) => t.toolSet === ts.name)
-          .map((t) => t.name),
-        loadMode: ts.loadMode,
-        activator: ts.activator,
-        handler: ts.handler,
-      });
-    }
-
-    // 注册 tools
+    // 注册 tools（顶层）
     const reg = (PluginRegistry as any).registrations.get(this.pluginId);
     if (reg) {
       for (const td of this._toolDefs) {
@@ -273,12 +288,15 @@ export class PluginApiImpl implements PluginApi {
       }
     }
 
+    // 注册 ToolKits
+    for (const tk of this._toolKits) {
+      PluginRegistry.registerToolKit(this.pluginId, tk.toRegistration());
+    }
+
     // 注册 prompts
     if (reg) {
       for (const pm of this._promptMetas) {
-        if (
-          !reg.prompts.find((x: any) => x.description === pm.description)
-        ) {
+        if (!reg.prompts.find((x: any) => x.description === pm.description)) {
           reg.prompts.push(pm);
         }
       }
@@ -292,5 +310,10 @@ export class PluginApiImpl implements PluginApi {
     handler: (ctx: any) => string | Promise<string>;
   }> {
     return this._promptMetas;
+  }
+
+  /** 获取命令提供者 供 PluginManager 消费 */
+  getCommandProviders(): ICommandProvider[] {
+    return this._commandProviders;
   }
 }

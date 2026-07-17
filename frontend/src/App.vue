@@ -3,27 +3,20 @@
     <div v-if="showThemeTransition" class="theme-transition-overlay"
         :class="{ 'theme-transition-active': isTransitioning }" :style="{ backgroundColor: transitionColor }"></div>
 
-    <!-- 自定义标题栏（仅在 Electron 环境显示） -->
+    <!-- 主内容区域 -->
     <div class="flex flex-col h-full">
         <div class="wallpaper-blur-layer"></div>
+        <!-- CustomTitlebar 始终可见 -->
         <CustomTitlebar @open-guide="openGuide" />
         <SetupGuide ref="guideRef" />
         <RouterView></RouterView>
     </div>
-    <!-- Mock 控制面板（仅开发环境） -->
-    <!-- <MockControlPanel v-if="isDev" /> -->
 
-<!-- 全局右键菜单 (Electron 剪贴板操作) -->
-<ContextMenu
-    :visible="globalMenuVisible"
-    :x="globalMenuX"
-    :y="globalMenuY"
-    :items="globalMenuItems.map(item => ({
+    <!-- 全局右键菜单 (Electron 剪贴板操作) -->
+    <ContextMenu :visible="globalMenuVisible" :x="globalMenuX" :y="globalMenuY" :items="globalMenuItems.map(item => ({
         label: item.label,
-        onClick: item.action || (() => {}),
-    }))"
-    @close="globalMenuVisible = false"
-/>
+        onClick: item.action || (() => { }),
+    }))" @close="globalMenuVisible = false" />
 
 </template>
 
@@ -32,6 +25,7 @@ import { ref, provide, onMounted, watch } from 'vue'
 import { useRouter, RouterView } from 'vue-router'
 import { useTitle } from './composables/useTitle'
 import { useTheme } from './composables/useTheme'
+import { useTrayStats } from './composables/useTrayStats'
 import MockControlPanel from './components/dev/MockControlPanel.vue'
 import CustomTitlebar from './components/CustomTitlebar.vue'
 import SetupGuide from './components/SetupGuide.vue'
@@ -40,6 +34,7 @@ import ContextMenuManager from './utils/ContextMenuManager'
 const router = useRouter()
 const title = useTitle()
 const theme = useTheme() //不要删除，这里会执行dark模式设置
+useTrayStats() // 托盘悬浮窗统计推送（仅 Electron 生效）
 const isDev = import.meta.env.DEV
 const guideRef = ref(null)
 
